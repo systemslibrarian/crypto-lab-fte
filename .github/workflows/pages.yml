@@ -22,6 +22,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A bounded job. Run 32296685908 hung on the Playwright install for 24
+    # minutes -- a step sibling labs finish in 35 seconds -- and Actions would
+    # have let it sit for six hours before timing it out. Fail fast instead.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -40,8 +44,37 @@ jobs:
       # bijectivity, and the full encode/decode round trip.
       - run: npm test
       - run: npm run build
+      # Cache the browser binaries: a cold install pulls ~170 MB every run.
+      # Keyed on the lockfile, so a Playwright bump invalidates it and nothing
+      # else does.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # NOT `--with-deps`. That flag is the only thing in this job that touches
+      # apt, and it is what hung run 32296685908: apt blocking on the dpkg lock
+      # behind the runner's unattended-upgrades. The ubuntu-latest image already
+      # ships the system libraries Chromium needs -- and the next step proves
+      # that per run rather than assuming it, so if an image ever stops shipping
+      # them the failure is one clear line instead of a mysterious timeout.
       - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
+
+      - name: Verify the browser launches
+        run: |
+          node -e "
+          require('playwright-core').chromium.launch()
+            .then(b => b.close())
+            .then(() => console.log('chromium launches'))
+            .catch(e => {
+              console.error('Chromium will not launch. The runner image is missing system libraries;');
+              console.error('re-add --with-deps to the install step above, or pin a container image.');
+              console.error(e.message);
+              process.exit(1);
+            });
+          "
       # The claims suite runs BEFORE the a11y gate: it is the faster of the two
       # and it is the one that catches a page printing numbers its own
       # mathematics does not support.
