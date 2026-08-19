@@ -1,0 +1,14 @@
+node_modules
+dist
+test-results
+playwright-report
+.DS_Store
+*.log
+
+# Nothing here creates these today. They are listed because a public repo is the
+# wrong place to discover that something did.
+.env
+.env.*
+coverage
+*.tsbuildinfo
+.vite

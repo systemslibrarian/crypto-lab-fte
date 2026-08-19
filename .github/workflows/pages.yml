@@ -1,0 +1,85 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Minimal at the top level. `pages: write` and `id-token: write` are what mint
+# the Pages deployment token, and the ONLY job that needs them is `deploy`. The
+# `build` job runs on pull_request and executes third-party code -- npm lifecycle
+# scripts, the bundler, a downloaded browser -- so it gets read access and
+# nothing more. Each job below widens its own permissions where it must.
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # 22, not 20. Vite 8 declares `^20.19.0 || >=22.12.0`, so a bare "20"
+          # only works while setup-node happens to resolve the latest 20.x —
+          # it is satisfied today and would break silently on an older 20.
+          node-version: 22
+      # `npm ci`, not `npm install`: the lockfile is committed, and `npm install`
+      # is free to resolve newer versions inside the semver ranges, so the tree
+      # the gate runs against would not be the tree the lockfile describes.
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # Unit tests: the nine NIST SP 800-38G FF1 sample vectors, the DFA
+      # construction checked against the platform regex engine, rank/unrank
+      # bijectivity, and the full encode/decode round trip.
+      - run: npm test
+      - run: npm run build
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # The claims suite runs BEFORE the a11y gate: it is the faster of the two
+      # and it is the one that catches a page printing numbers its own
+      # mathematics does not support.
+      - name: Claims suite (the page tells the truth)
+        run: npm run test:e2e
+      - name: Accessibility gate (axe-core, WCAG A/AA)
+        run: npm run test:a11y
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment
+
+  # Dependabot only. Runs after the gate above, so a bump can only merge itself
+  # if this lab's own tests, build, claims suite and axe run went green on the PR.
+  dependabot-auto-merge:
+    needs: build
+    if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge any bump whose gate went green
+        run: gh pr merge --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
