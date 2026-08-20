@@ -1004,6 +1004,33 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
 
   await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
 
+  // ── Key agreement, fragments, freshness ─────────────────────────────────
+  await page.click('#hs-run');
+  await settleStatus(page, 'hs-status');
+  await expect(page.locator('#hs-body tr')).toHaveCount(2);
+  await scanAt('key exchange run — two public keys and one shared root');
+
+  await page.fill('#frag-message', 'meet me at six');
+  await page.click('#frag-seal');
+  await settleStatus(page, 'frag-status');
+  await expect(page.locator('#frag-out')).not.toHaveClass(/is-empty/);
+  await scanAt('fragments sealed — an authenticated message across several phone numbers');
+
+  await page.click('#frag-tamper');
+  await settleStatus(page, 'frag-status');
+  await expect(page.locator('#frag-status-text')).toContainText('refused');
+  await scanAt('one fragment tampered with — the whole message refused');
+
+  await page.click('#replay-open');
+  await settleStatus(page, 'replay-status');
+  await scanAt('fragments opened once — the freshness window now holds a counter');
+
+  await page.click('#replay-again');
+  await settleStatus(page, 'replay-status');
+  await expect(page.locator('#replay-status-text')).toContainText('Authentication failed');
+  await scanAt('the same strings replayed — refused, in the error tone');
+  await page.click('#replay-reset');
+
   // ── The guided path ─────────────────────────────────────────────────────
   await page.click('#tour-start');
   await expect(page.locator('#tour-panel')).toBeVisible();

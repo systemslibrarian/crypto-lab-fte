@@ -814,8 +814,101 @@ export function template(): string {
         </div>
       </section>
 
+      <section class="panel" aria-labelledby="beyond-heading">
+        <span class="panel-kicker">9 · KEYS, FRAGMENTS, FRESHNESS</span>
+        <h2 id="beyond-heading">The three things a mode still is not a protocol without</h2>
+        <p>
+          The panel above fixes the construction. It does not make it a protocol. Three gaps are
+          left, and each one is small enough to close here rather than describe.
+        </p>
+
+        <h3>A real key agreement</h3>
+        <p>
+          The mode above derives its root by running PBKDF2 over a passphrase, which is a stand-in
+          and says so. This is the thing it stands in for: two ephemeral key pairs, public keys
+          exchanged over a channel the adversary may read, and a shared secret that never crosses
+          it. X25519 where the browser has it, P-256 otherwise &mdash; which one ran is reported
+          rather than assumed.
+        </p>
+        <div class="button-row">
+          <button id="hs-run" type="button" class="primary">Run the exchange</button>
+        </div>
+        <p class="status" id="hs-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="hs-status-text">No exchange yet.</span>
+        </p>
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Key exchange, scrollable">
+          <table>
+            <caption id="hs-caption">What each side holds, and what it derives.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Side</th>
+                <th scope="col">Public key (crosses the channel)</th>
+                <th scope="col">Derived root (never does)</th>
+              </tr>
+            </thead>
+            <tbody id="hs-body"></tbody>
+          </table>
+        </div>
+        <p class="callout" id="hs-verdict">Run it and compare the two roots.</p>
+        <div class="limit">
+          <h4>What this still is not</h4>
+          <p>
+            Unauthenticated Diffie&ndash;Hellman. Nothing here proves <em>whose</em> public key you
+            received, so an adversary who can relay messages can sit in the middle and run two
+            exchanges, one with each side. Closing that needs a signature over the transcript under
+            a long-term identity key, a key pinned out of band, or a full Noise pattern. The
+            transcript binding below is necessary for that and nowhere near sufficient.
+          </p>
+        </div>
+
+        <h3>Fragments, so a phone number can carry a tag after all</h3>
+        <p>
+          One phone number holds four whole bytes and an authenticated message needs more than
+          that, so the mode above refuses. The way out is to send several &mdash; but a fragment
+          cannot afford to carry its own index or its own tag. So the counter doubles as the
+          sequence number, only the first fragment spends a byte on the count, and there is
+          <strong>one tag over the whole message</strong> rather than one per piece.
+        </p>
+        <div class="field">
+          <label for="frag-message">Message</label>
+          <input id="frag-message" type="text" spellcheck="false" autocomplete="off" />
+          <p class="field-note" id="frag-plan">&nbsp;</p>
+        </div>
+        <div class="button-row">
+          <button id="frag-seal" type="button" class="primary">Seal into phone numbers</button>
+          <button id="frag-open" type="button">Reassemble</button>
+          <button id="frag-tamper" type="button">Tamper with one</button>
+        </div>
+        <p class="status" id="frag-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="frag-status-text">Idle.</span>
+        </p>
+        <h4>On the wire</h4>
+        <output id="frag-out" class="mono-out is-empty" for="frag-seal frag-message">Nothing sealed yet.</output>
+        <p class="hint">
+          Twelve phone numbers in a row is itself a traffic-analysis signal &mdash; which is exactly
+          the limitation FTE does not address, and fragmenting does not fix.
+        </p>
+
+        <h3>Freshness</h3>
+        <p>
+          A verified message is authentic. It is not necessarily <em>new</em>: replay a recorded
+          string and the tag verifies, because it is the same tag it always was. The receiver keeps
+          a sliding window of counters it has already accepted &mdash; the standard IPsec and DTLS
+          construction &mdash; and refuses a repeat through the same path as a forgery.
+        </p>
+        <div class="button-row">
+          <button id="replay-open" type="button" class="primary">Open the fragments</button>
+          <button id="replay-again" type="button">Open the very same strings again</button>
+          <button id="replay-reset" type="button">Reset the window</button>
+        </div>
+        <p class="status" id="replay-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="replay-status-text">Seal some fragments first.</span>
+        </p>
+        <p class="field-note" id="replay-window">&nbsp;</p>
+      </section>
+
       <section class="panel refs" aria-labelledby="refs-heading">
-        <span class="panel-kicker">9 · SOURCES</span>
+        <span class="panel-kicker">10 · SOURCES</span>
         <h2 id="refs-heading">References</h2>
         <ol>
           <li>

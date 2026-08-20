@@ -55,6 +55,7 @@ import {
 import { aesCtrDecrypt, aesCtrEncrypt } from "./keys.ts";
 import { CountTable, buildCountTable } from "./rank.ts";
 import { rankFixed, unrankFixed } from "./rankct.ts";
+import { ReplayWindow, wouldAccept } from "./replay.ts";
 import {
   DEFAULT_WINDOW,
   MessageKeys,
@@ -293,7 +294,15 @@ export async function open(
   root: Uint8Array,
   expectedCounter: number,
   tagBytes: TagBytes,
-  window: number = DEFAULT_WINDOW
+  window: number = DEFAULT_WINDOW,
+  /**
+   * Optional freshness check. A verified message is authentic but not
+   * necessarily NEW — the same string replayed carries the same valid tag it
+   * always did. When a window is supplied, a counter it has already accepted is
+   * refused through the same path as a forgery, and the caller records the
+   * counter itself so a message rejected downstream does not burn it.
+   */
+  replay?: ReplayWindow
 ): Promise<OpenResult> {
   const n = Array.from(stego).length;
   let table: CountTable;
@@ -332,6 +341,9 @@ export async function open(
       const offered = payload.slice(1 + b.plaintextBytes);
       const expected = await computeTag(keys.macKey, counter, ciphertext, tagBytes);
       if (!equalCT(offered, expected)) continue;
+
+      // Authentic. Now, is it fresh? Same refusal either way.
+      if (replay && wouldAccept(replay, counter) !== true) throw new AuthError();
 
       // Only now is the plaintext touched.
       const padded = await aesCtrDecrypt(keys.aesKey, ciphertext);

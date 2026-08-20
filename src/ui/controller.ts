@@ -50,6 +50,9 @@ import {
   seal as authSeal
 } from "../aead.ts";
 import { deriveRoot } from "../schedule.ts";
+import { Identity, agree, bestSuite, generateIdentity } from "../handshake.ts";
+import { SealedFragments, openFragments, plan, sealFragments } from "../frag.ts";
+import { ReplayWindow, accept, createWindow, describe as describeWindow } from "../replay.ts";
 import { FF1_VECTORS, VectorRun, runVector, tally } from "../vectors.ts";
 import { assertNoSecrets, decodeState, encodeState } from "../share.ts";
 import { CurveInput, WalkInput, renderCurve, renderWalk, walkReadout } from "./charts.ts";
@@ -80,6 +83,11 @@ interface State {
   /** The passphrase `authRoot` belongs to, so a change invalidates it. */
   authRootFor: string | null;
   lastSeal: SealResult | null;
+  /** Root from the key exchange, when one has been run. */
+  handshakeRoot: Uint8Array | null;
+  lastFragments: SealedFragments | null;
+  /** The receiver's freshness window for the fragment demo. */
+  replayWindow: ReplayWindow;
 }
 
 const state: State = {
@@ -94,7 +102,10 @@ const state: State = {
   classifierPinned: false,
   authRoot: null,
   authRootFor: null,
-  lastSeal: null
+  lastSeal: null,
+  handshakeRoot: null,
+  lastFragments: null,
+  replayWindow: createWindow()
 };
 
 const GAME_GENERATED = 4;
@@ -467,6 +478,7 @@ function afterCompile(): void {
   renderCurvePanel();
   renderLadder();
   renderBudget();
+  renderFragPlan();
   syncClassifierPattern();
   clearGame();
   setStatus("game-status", "idle", "Deal a round to play.");
@@ -1644,6 +1656,179 @@ async function runAuthAttack(): Promise<void> {
   }
 }
 
+// ── Key agreement ───────────────────────────────────────────────────────────
+
+function shortHex(text: string, keep = 10): string {
+  return text.length <= keep * 2 ? text : `${text.slice(0, keep)}…${text.slice(-keep)}`;
+}
+
+async function runHandshake(): Promise<void> {
+  const button = $("hs-run") as HTMLButtonElement;
+  const body = $("hs-body");
+  button.disabled = true;
+  setStatus("hs-status", "working", "Generating two key pairs…");
+  try {
+    const suite = await bestSuite();
+    const alice = await generateIdentity(suite);
+    const bob = await generateIdentity(suite);
+
+    // Each side derives from its OWN private key and the OTHER's public key.
+    const a = await agree(alice, bob.publicKeyHex);
+    const b = await agree(bob, alice.publicKeyHex);
+    const match = a.root.length === b.root.length && a.root.every((byte, i) => byte === b.root[i]);
+
+    body.textContent = "";
+    for (const [name, id, root] of [
+      ["Alice", alice, a.root],
+      ["Bob", bob, b.root]
+    ] as Array<[string, Identity, Uint8Array]>) {
+      const tr = document.createElement("tr");
+      const head = document.createElement("th");
+      head.scope = "row";
+      head.textContent = name;
+      tr.appendChild(head);
+      for (const text of [
+        shortHex(id.publicKeyHex),
+        shortHex(Array.from(root, (byte) => byte.toString(16).padStart(2, "0")).join(""))
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+
+    state.handshakeRoot = match ? a.root : null;
+    $("hs-verdict").textContent = match
+      ? `Both sides derived the same root from public keys alone — nothing secret crossed the channel. Suite: ${suite}, ${suite === "X25519" ? 32 : 65}-byte public keys. The fragments below now use this root instead of a passphrase.`
+      : "The two roots differ, which should be impossible. Do not trust this exchange.";
+    setStatus(
+      "hs-status",
+      match ? "ok" : "error",
+      match ? `${suite} exchange complete; the roots match.` : "The roots do not match."
+    );
+  } catch (error) {
+    setStatus("hs-status", "error", (error as Error).message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// ── Fragments ───────────────────────────────────────────────────────────────
+
+/** The root the fragment demo uses: the exchanged one when there is one. */
+async function fragmentRoot(): Promise<Uint8Array> {
+  if (state.handshakeRoot) return state.handshakeRoot;
+  return rootFor(($("auth-passphrase") as HTMLInputElement).value || "correct horse battery staple");
+}
+
+function renderFragPlan(): void {
+  const format = state.format;
+  const note = $("frag-plan");
+  if (!format) {
+    note.textContent = "No automaton — fix the pattern above.";
+    return;
+  }
+  const message = ($("frag-message") as HTMLInputElement).value;
+  const bytes = utf8Length(message);
+  const capacity = capacityBitsOf(format.counts[state.n] ?? 0n);
+  const p = plan(capacity, currentTagBytes(), bytes);
+  note.textContent = p.fits
+    ? `${bytes} bytes plus a ${currentTagBytes()}-byte tag and a 2-byte length is a ${p.blobBytes}-byte blob. At ${p.payloadBytes} bytes a string — ${p.firstChunk} in the first, ${p.restChunk} after — that is ${p.fragments} string${p.fragments === 1 ? "" : "s"}.`
+    : (p.reason ?? "This message cannot be fragmented into this format.");
+}
+
+async function runFragSeal(): Promise<void> {
+  const format = state.format;
+  if (!format) return;
+  const button = $("frag-seal") as HTMLButtonElement;
+  button.disabled = true;
+  setStatus("frag-status", "working", "Sealing…");
+  try {
+    const sealed = await sealFragments({
+      format,
+      n: state.n,
+      root: await fragmentRoot(),
+      baseCounter: 0,
+      message: ($("frag-message") as HTMLInputElement).value,
+      tagBytes: currentTagBytes()
+    });
+    state.lastFragments = sealed;
+    state.replayWindow = createWindow();
+    setOutput("frag-out", sealed.strings.join("\n"), false);
+    setStatus(
+      "frag-status",
+      "ok",
+      `${sealed.strings.length} string${sealed.strings.length === 1 ? "" : "s"}, one tag over all of them. Each one is a valid member of the format on its own.`
+    );
+    setStatus("replay-status", "idle", "Fresh window. Open the fragments, then try again.");
+    $("replay-window").textContent = describeWindow(state.replayWindow);
+  } catch (error) {
+    state.lastFragments = null;
+    setOutput("frag-out", "Nothing sealed.", true);
+    setStatus("frag-status", "error", (error as Error).message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runFragOpen(strings: string[], statusId: string, useWindow: boolean): Promise<void> {
+  const format = state.format;
+  if (!format) return;
+  try {
+    const opened = await openFragments(
+      format,
+      strings,
+      await fragmentRoot(),
+      0,
+      currentTagBytes(),
+      16,
+      useWindow ? state.replayWindow : undefined
+    );
+    if (useWindow) {
+      state.replayWindow = accept(state.replayWindow, opened.baseCounter);
+      $("replay-window").textContent = describeWindow(state.replayWindow);
+    }
+    setStatus(
+      statusId,
+      "ok",
+      `Reassembled ${opened.fragments} fragments into "${opened.message}" at base counter ${opened.baseCounter}.`
+    );
+  } catch (error) {
+    setStatus(statusId, "error", (error as Error).message);
+  }
+}
+
+async function runFragTamper(): Promise<void> {
+  const format = state.format;
+  const sealed = state.lastFragments;
+  if (!format || !sealed) {
+    setStatus("frag-status", "error", "Seal something first.");
+    return;
+  }
+  const table = buildCountTable(format.dfa, state.n);
+  const swapped = [...sealed.strings];
+  const at = Math.floor(sealed.strings.length / 2);
+  // A different, perfectly valid member of the language — the substitution the
+  // unauthenticated mode cannot detect.
+  let replacement = unrank(format.dfa, table, randomBelow(table.total));
+  while (replacement === swapped[at]) {
+    replacement = unrank(format.dfa, table, randomBelow(table.total));
+  }
+  swapped[at] = replacement;
+
+  try {
+    await openFragments(format, swapped, await fragmentRoot(), 0, currentTagBytes(), 16);
+    setStatus("frag-status", "error", "The tampered set was ACCEPTED. That must not happen.");
+  } catch {
+    setStatus(
+      "frag-status",
+      "ok",
+      `Replaced fragment ${at + 1} of ${sealed.strings.length} with a different valid ${state.format?.pattern === PRESETS[0].pattern ? "phone number" : "member of the format"} — refused. One tag covers the whole message, so tampering with any single piece fails all of it.`
+    );
+  }
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 function debounce(fn: () => void, ms: number): () => void {
@@ -1800,6 +1985,41 @@ export function initUI(root: HTMLElement): void {
   $("auth-seal").addEventListener("click", () => void runSeal());
   $("auth-open").addEventListener("click", () => void runOpen());
   $("auth-attack").addEventListener("click", () => void runAuthAttack());
+
+  // ── Key agreement, fragments, freshness ───────────────────────────────────
+  $("hs-run").addEventListener("click", () => void runHandshake());
+  ($("frag-message") as HTMLInputElement).addEventListener("input", renderFragPlan);
+  $("frag-seal").addEventListener("click", () => void runFragSeal());
+  $("frag-open").addEventListener("click", () => {
+    const sealed = state.lastFragments;
+    if (!sealed) {
+      setStatus("frag-status", "error", "Seal something first.");
+      return;
+    }
+    void runFragOpen(sealed.strings, "frag-status", false);
+  });
+  $("frag-tamper").addEventListener("click", () => void runFragTamper());
+  $("replay-open").addEventListener("click", () => {
+    const sealed = state.lastFragments;
+    if (!sealed) {
+      setStatus("replay-status", "error", "Seal some fragments first.");
+      return;
+    }
+    void runFragOpen(sealed.strings, "replay-status", true);
+  });
+  $("replay-again").addEventListener("click", () => {
+    const sealed = state.lastFragments;
+    if (!sealed) {
+      setStatus("replay-status", "error", "Seal some fragments first.");
+      return;
+    }
+    void runFragOpen(sealed.strings, "replay-status", true);
+  });
+  $("replay-reset").addEventListener("click", () => {
+    state.replayWindow = createWindow();
+    $("replay-window").textContent = describeWindow(state.replayWindow);
+    setStatus("replay-status", "idle", "Window reset — the same strings will be accepted again.");
+  });
   ($("auth-tag") as HTMLSelectElement).addEventListener("change", renderBudget);
   ($("auth-passphrase") as HTMLInputElement).addEventListener("input", () => {
     // A changed passphrase invalidates the cached root; the next seal pays
@@ -1837,6 +2057,7 @@ export function initUI(root: HTMLElement): void {
   ($("encode-message") as HTMLTextAreaElement).value = shared.message ?? "hi";
   ($("quick-message") as HTMLInputElement).value = shared.message ?? "hi";
   ($("auth-message") as HTMLInputElement).value = "meet at six";
+  ($("frag-message") as HTMLInputElement).value = "meet me at six";
   applyPreset(presetSelect.value);
 
   // A shared pattern may be a custom one, and a shared n may differ from the
@@ -1873,4 +2094,6 @@ export function initUI(root: HTMLElement): void {
   // An empty tbody under a header row is `th-has-data-cells`, so the not-yet-run
   // state is a real row saying so — the same rule the count table follows.
   placeholderRow($("vectors-body"), 6, "Not run yet — press the button above.");
+  placeholderRow($("hs-body"), 3, "No exchange yet — press the button above.");
+  $("replay-window").textContent = describeWindow(state.replayWindow);
 }

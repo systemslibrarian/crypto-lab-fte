@@ -37,6 +37,9 @@ The exact primitives on this page, all of them running in the browser tab:
 | HKDF-SHA256 key schedule + ratchet | `src/schedule.ts` | PBKDF2 once as a handshake stand-in, then a per-message chain; the FF1 tweak comes from the counter, so nothing travels beside the string |
 | Encrypt-then-MAC (HMAC-SHA256, truncated) | `src/aead.ts` | the authenticated mode: fixed-size padding, one indistinguishable failure, implicit counter with a resync window |
 | Branchless ranking | `src/rankct.ts` | unranking without secret-dependent control flow (see the caveat — this is not constant-time) |
+| X25519 / P-256 key agreement | `src/handshake.ts` | ephemeral ECDH with a transcript-bound HKDF, replacing the passphrase stand-in |
+| Fragmentation | `src/frag.ts` | one authenticated message across several strings, so a narrow format can carry a tag after all |
+| Replay window | `src/replay.ts` | the IPsec/DTLS sliding-window freshness check — authenticity is not novelty |
 | Shareable state | `src/share.ts` | pattern, `n`, message and classifier rule in the fragment — never a passphrase or salt |
 
 ### The bijection
@@ -184,7 +187,18 @@ A tour of the interactive panels, numbered as the page numbers them.
    message at all**, and the panel refuses with the arithmetic spelled out. Press the attack
    button and the same substitution that beats the unauthenticated mode roughly one time in
    thirty is refused 60 times out of 60.
-9. **References and glossary.** The four sources this is built from, nine terms defined, and a
+9. **Keys, fragments, freshness.** The three things the mode above still is not a protocol
+   without. A **live X25519 exchange** (P-256 where the browser lacks it) in which two sides
+   derive an identical root from public keys alone — with the caveat stated plainly that
+   unauthenticated Diffie–Hellman is wide open to an active machine-in-the-middle.
+   **Fragmentation**, which is how a phone number carries an authenticated message after all: the
+   counter doubles as the sequence number, only the first fragment spends a byte on the count, and
+   one tag covers the whole message, so tampering with any single piece fails all of it. A 14-byte
+   message becomes 9 phone numbers. And a **freshness window** — the IPsec/DTLS sliding
+   construction — because a verified message is authentic but not necessarily new: open the same
+   strings twice and the second attempt is refused through the same path as a forgery, with the
+   same words, so there is no replay oracle either.
+10. **References and glossary.** The four sources this is built from, nine terms defined, and a
    **known-answer panel that runs the NIST vectors in your browser**. Six of the nine run; the
    other three use AES-192, which WebCrypto does not implement in any browser, so they are marked
    UNSUPPORTED rather than failed and are covered by the Node suite. That split is worth noticing:
@@ -380,7 +394,7 @@ build-time secret; opening `dist/index.html` through any static server is enough
 
 ## Build & Verify
 
-`npm test` runs **126 tests across 12 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
+`npm test` runs **166 tests across 15 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
 
 | File | Tests | What it pins down |
 | --- | --- | --- |
@@ -393,8 +407,11 @@ build-time secret; opening `dist/index.html` through any static server is enough
 | `src/pathtrace.test.ts` | 8 | The traced path agreeing with `rank`/`unrank` over an entire language slice, each step starting where the last ended, the exact index where a string leaves the language, and self-loops collapsing to one edge |
 | `src/lengths.test.ts` | 8 | The ladder picking the same `n` the encoder would, checked in closed form (`2(b+1)` for hex); a fixed-length format collapsing to one bucket; a variable-length one separating every size; wire length monotone in message size; and empty or unfittable slices not throwing |
 | `src/substitute.test.ts` | 6 | Every substituted string a genuine language member and never the original; **no substitution ever returning the message that was sent**; the three outcomes partitioning the run; and the measured pass-the-frame-byte rate tracking `frameByteFalseAccept`'s closed form, which counts intervals rather than running the cipher |
-| `src/aead.test.ts` | 16 | The capacity budget refusing what it says it refuses; fixed-size padding making the wire length constant; `n` never grown; resynchronisation across a gap without transmitting the counter; every substitution rejected; and **six different failure causes producing one byte-identical error**, which is the property the unauthenticated decoder lacks |
+| `src/aead.test.ts` | 18 | The capacity budget refusing what it says it refuses; fixed-size padding making the wire length constant; `n` never grown; resynchronisation across a gap without transmitting the counter; every substitution rejected; and **six different failure causes producing one byte-identical error**, which is the property the unauthenticated decoder lacks |
 | `src/rankct.test.ts` | 8 | The branchless unranking enumerating four languages **identically to `rank.ts` over entire slices**, plus a Proxy-instrumented count showing its run-loop iterations do not vary with the secret index — and that the original's *do*, so the control half of the test cannot pass for the wrong reason |
+| `src/handshake.test.ts` | 16 | Both sides deriving one root from public keys alone, on **both suites**; a watcher with both public keys deriving something else; every exchange fresh; cross-suite keys refused by length; and the transcript sorted so the two sides build it identically |
+| `src/frag.test.ts` | 14 | The plan being **tight** — the claimed fragment count holds the blob and one fewer would not — across four capacities, three tag sizes and four message lengths; a 16-byte message with a 128-bit tag needing exactly 12 phone numbers; and tampering, reordering or dropping any single fragment failing the whole message |
+| `src/replay.test.ts` | 8 | Out-of-order arrivals accepted once and only once; anything past the window floor refused as too old; **a jump past the window emptying the bitmap** rather than wrapping stale bits into false freshness |
 | `src/share.test.ts` | 9 | Round-tripping regex metacharacters through the fragment, dropping unknown and oversized keys, surviving eleven hostile fragments without throwing, and refusing to write a URL containing key material — including a passphrase with a space, which an earlier `decodeURIComponent`-based check let through |
 
 The known-answer tests are the first two rows: `src/ff1.test.ts` for the cipher, `src/rank.test.ts`
@@ -434,7 +451,7 @@ contrast audit against a checked-in baseline, and a horizontal-overflow check fo
 reflow. Uncaught page errors fail the run. Nothing is injected into the page and no disclosure is
 opened from script, so the rendering that is scanned is the rendering a reader actually gets.
 
-**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **56 tests** asking a different
+**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **65 tests** asking a different
 question from the unit tests: does the page tell the truth about what it computed? The rule that
 makes them worth anything is that each compares two values the *page* printed, or re-derives a
 claim from the page's own inputs by a different route than the source takes. The independent

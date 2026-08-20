@@ -1204,3 +1204,18 @@ tr.is-skipped th[scope="row"] {
 #auth-verdict {
   overflow-wrap: anywhere;
 }
+
+/* ── Keys, fragments, freshness ── */
+#frag-out {
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+#hs-verdict,
+#frag-plan,
+#replay-window {
+  overflow-wrap: anywhere;
+}
+#replay-window {
+  margin-top: 0.5rem;
+  color: var(--text);
+}

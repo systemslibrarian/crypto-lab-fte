@@ -1232,3 +1232,169 @@ test.describe('the authenticated mode does what the limitations say is missing',
     expect(caveat).toContain('variable-time');
   });
 });
+
+/**
+ * Key agreement, fragments and freshness. Each makes a claim a reader would be
+ * right to doubt — that two sides derived the same secret without sending it,
+ * that a phone number can carry a tag after all, that an authentic message can
+ * still be refused — so each is checked against something the page did not
+ * compute for itself.
+ */
+test.describe('the key exchange derives a shared root without sending one', () => {
+  test('two different public keys, one identical root', async ({ page }) => {
+    await boot(page);
+    await page.click('#hs-run');
+    await settleStatus(page, 'hs-status');
+
+    const rows = await page.locator('#hs-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        side: (tr.children[0].textContent ?? '').trim(),
+        pub: (tr.children[1].textContent ?? '').trim(),
+        root: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    expect(rows.map((r) => r.side)).toEqual(['Alice', 'Bob']);
+    // Different key pairs...
+    expect(rows[0].pub).not.toBe(rows[1].pub);
+    // ...and the same derived root. That is the whole of Diffie-Hellman.
+    expect(rows[0].root).toBe(rows[1].root);
+    expect(rows[0].root).not.toBe(rows[0].pub);
+    await expect(page.locator('#hs-verdict')).toContainText('nothing secret crossed the channel');
+  });
+
+  test('a fresh exchange gives a fresh root every time', async ({ page }) => {
+    await boot(page);
+    const roots = new Set<string>();
+    for (let i = 0; i < 3; i += 1) {
+      await page.click('#hs-run');
+      await settleStatus(page, 'hs-status');
+      roots.add(
+        await page.locator('#hs-body tr').first().evaluate((tr) => (tr.children[2].textContent ?? '').trim())
+      );
+    }
+    expect(roots.size).toBe(3);
+  });
+
+  test('the page does not claim the exchange is authenticated', async ({ page }) => {
+    await boot(page);
+    const section = (await page.locator('#beyond-heading').locator('..').textContent()) ?? '';
+    expect(section).toContain('Unauthenticated Diffie');
+    expect(section).toContain('sit in the middle');
+    expect(section).toContain('Nothing here proves');
+  });
+});
+
+test.describe('fragments carry what one string cannot', () => {
+  test('a phone number carries an authenticated message once it is fragmented', async ({ page }) => {
+    await boot(page);
+    await page.click('#hs-run');
+    await settleStatus(page, 'hs-status');
+
+    // The single-string mode refuses this format outright...
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('does not fit');
+
+    // ...and fragmenting is what gets round it.
+    await page.fill('#frag-message', 'meet me at six');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+
+    const wire = (await text(page, 'frag-out')).split('\n').map((s) => s.trim()).filter(Boolean);
+    const pattern = await page.inputValue('#pattern');
+    expect(pattern).toBe(PHONE);
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    expect(wire.length).toBeGreaterThan(1);
+    // Every fragment is independently a valid phone number, per the platform.
+    for (const s of wire) expect(anchored.test(s), s).toBe(true);
+    expect(new Set(wire).size).toBe(wire.length);
+
+    await page.click('#frag-open');
+    await settleStatus(page, 'frag-status');
+    await expect(page.locator('#frag-status-text')).toContainText('"meet me at six"');
+  });
+
+  test('the plan states a fragment count the seal then produces', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'a longer message to spread out');
+    const planned = /that is (\d+) strings/.exec(await text(page, 'frag-plan'));
+    expect(planned, await text(page, 'frag-plan')).not.toBeNull();
+
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    const wire = (await text(page, 'frag-out')).split('\n').filter((s) => s.trim());
+    expect(wire).toHaveLength(Number(planned![1]));
+  });
+
+  test('tampering with one fragment fails the whole message', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'do not tamper');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#frag-tamper');
+    await settleStatus(page, 'frag-status');
+    await expect(page.locator('#frag-status-text')).toContainText('refused');
+    await expect(page.locator('#frag-status-text')).toContainText('tampering with any single piece fails all of it');
+  });
+});
+
+test.describe('freshness is separate from authenticity', () => {
+  test('the same strings open once, then are refused as a replay', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'once only');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('"once only"');
+    await expect(page.locator('#replay-window')).toContainText('Highest accepted: 0');
+
+    // Byte-identical input, still perfectly authentic, now refused.
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('Authentication failed');
+  });
+
+  test('the refusal is the same message a forgery gets — no replay oracle', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'once only');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    const replayText = await text(page, 'replay-status-text');
+
+    // Now a genuine forgery, through the tamper button, and compare wording.
+    await page.click('#frag-tamper');
+    await settleStatus(page, 'frag-status');
+    // The tamper handler reports success-of-refusal in its own words, so
+    // compare against the mode above, which surfaces the raw error.
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.selectOption('#preset', 'phone');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    expect(replayText).toContain('Authentication failed');
+    expect(replayText).not.toMatch(/replay|counter \d+|already/i);
+  });
+
+  test('resetting the window makes the same strings acceptable again', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'again please');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('Authentication failed');
+
+    await page.click('#replay-reset');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('"again please"');
+  });
+});

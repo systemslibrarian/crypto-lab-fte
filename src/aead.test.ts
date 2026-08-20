@@ -187,3 +187,31 @@ describe("authentication", () => {
     expect(messages.size, `distinct refusal messages: ${[...messages].join(" | ")}`).toBe(1);
   });
 });
+
+describe("freshness", () => {
+  it("a replayed string is refused, with the same error as a forgery", async () => {
+    const { accept, createWindow } = await import("./replay.ts");
+    const format = compileFormat(HEX);
+    const sealed = await seal({
+      format, n: 32, root: await root(), counter: 3, message: "once", tagBytes: 8
+    });
+
+    let win = createWindow();
+    const first = await open(format, sealed.stego, await root(), 0, 8, 32, win);
+    expect(first.message).toBe("once");
+    win = accept(win, first.counter);
+
+    // The tag still verifies — it is the same tag. Only freshness rejects it.
+    await expect(open(format, sealed.stego, await root(), 0, 8, 32, win)).rejects.toThrow(AuthError);
+  });
+
+  it("without a window, a replay is happily accepted — which is the point", async () => {
+    const format = compileFormat(HEX);
+    const sealed = await seal({
+      format, n: 32, root: await root(), counter: 3, message: "once", tagBytes: 8
+    });
+    for (let i = 0; i < 3; i += 1) {
+      expect((await open(format, sealed.stego, await root(), 0, 8, 32)).message).toBe("once");
+    }
+  });
+});
