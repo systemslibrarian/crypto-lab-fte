@@ -17,3 +17,6 @@ coverage
 # note the sibling labs DO track their chat.md, so this is a local divergence.
 chat.md
 chad.md
+
+# Throwaway Playwright drivers used while checking the page in a real browser.
+.pw-*.mjs
