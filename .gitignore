@@ -12,3 +12,8 @@ playwright-report
 coverage
 *.tsbuildinfo
 .vite
+
+# Review/working notes. Kept on disk, deliberately not tracked in this repo —
+# note the sibling labs DO track their chat.md, so this is a local divergence.
+chat.md
+chad.md
