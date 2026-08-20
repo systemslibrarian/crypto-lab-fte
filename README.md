@@ -34,6 +34,9 @@ The exact primitives on this page, all of them running in the browser tab:
 | Path tracing | `src/pathtrace.ts` | the route a string walks through the DFA, for the highlighted drawing |
 | Substitution attack | `src/substitute.ts` | swaps the stego string for other language members and runs the receiver's own decode over each |
 | Length ladder | `src/lengths.ts` | message size against the length that appears on the wire — the leak as an observer would tabulate it |
+| HKDF-SHA256 key schedule + ratchet | `src/schedule.ts` | PBKDF2 once as a handshake stand-in, then a per-message chain; the FF1 tweak comes from the counter, so nothing travels beside the string |
+| Encrypt-then-MAC (HMAC-SHA256, truncated) | `src/aead.ts` | the authenticated mode: fixed-size padding, one indistinguishable failure, implicit counter with a resync window |
+| Branchless ranking | `src/rankct.ts` | unranking without secret-dependent control flow (see the caveat — this is not constant-time) |
 | Shareable state | `src/share.ts` | pattern, `n`, message and classifier rule in the fragment — never a passphrase or salt |
 
 ### The bijection
@@ -170,7 +173,18 @@ A tour of the interactive panels, numbered as the page numbers them.
    never sent**. The measured share getting past the frame byte is printed beside the closed-form
    prediction — about 42% against 43.1% on the phone format — which is two independent routes to
    the number the paragraph above claims. PBKDF2 runs once for the whole run, not per trial.
-8. **References and glossary.** The four sources this is built from, nine terms defined, and a
+8. **The fix.** The same lab with production requirements applied, running *beside* the
+   unauthenticated pipeline rather than replacing it — a mode with a MAC cannot demonstrate what
+   happens to one without. Encrypt-then-MAC with a truncated HMAC-SHA256 verified before the
+   plaintext is touched; one indistinguishable error for every rejection; an HKDF ratchet with
+   PBKDF2 run once rather than per message; the FF1 tweak derived from an implicit counter so
+   **nothing travels beside the string** — no salt, no sequence number; fixed-size padding with
+   `n` never grown; and branchless unranking. A live budget table shows the cost: a tag competes
+   with the message for the format's capacity, so a phone number **cannot carry an authenticated
+   message at all**, and the panel refuses with the arithmetic spelled out. Press the attack
+   button and the same substitution that beats the unauthenticated mode roughly one time in
+   thirty is refused 60 times out of 60.
+9. **References and glossary.** The four sources this is built from, nine terms defined, and a
    **known-answer panel that runs the NIST vectors in your browser**. Six of the nine run; the
    other three use AES-192, which WebCrypto does not implement in any browser, so they are marked
    UNSUPPORTED rather than failed and are covered by the Node suite. That split is worth noticing:
@@ -366,7 +380,7 @@ build-time secret; opening `dist/index.html` through any static server is enough
 
 ## Build & Verify
 
-`npm test` runs **102 tests across 10 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
+`npm test` runs **126 tests across 12 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
 
 | File | Tests | What it pins down |
 | --- | --- | --- |
@@ -379,6 +393,8 @@ build-time secret; opening `dist/index.html` through any static server is enough
 | `src/pathtrace.test.ts` | 8 | The traced path agreeing with `rank`/`unrank` over an entire language slice, each step starting where the last ended, the exact index where a string leaves the language, and self-loops collapsing to one edge |
 | `src/lengths.test.ts` | 8 | The ladder picking the same `n` the encoder would, checked in closed form (`2(b+1)` for hex); a fixed-length format collapsing to one bucket; a variable-length one separating every size; wire length monotone in message size; and empty or unfittable slices not throwing |
 | `src/substitute.test.ts` | 6 | Every substituted string a genuine language member and never the original; **no substitution ever returning the message that was sent**; the three outcomes partitioning the run; and the measured pass-the-frame-byte rate tracking `frameByteFalseAccept`'s closed form, which counts intervals rather than running the cipher |
+| `src/aead.test.ts` | 16 | The capacity budget refusing what it says it refuses; fixed-size padding making the wire length constant; `n` never grown; resynchronisation across a gap without transmitting the counter; every substitution rejected; and **six different failure causes producing one byte-identical error**, which is the property the unauthenticated decoder lacks |
+| `src/rankct.test.ts` | 8 | The branchless unranking enumerating four languages **identically to `rank.ts` over entire slices**, plus a Proxy-instrumented count showing its run-loop iterations do not vary with the secret index — and that the original's *do*, so the control half of the test cannot pass for the wrong reason |
 | `src/share.test.ts` | 9 | Round-tripping regex metacharacters through the fragment, dropping unknown and oversized keys, surviving eleven hostile fragments without throwing, and refusing to write a URL containing key material — including a passphrase with a space, which an earlier `decodeURIComponent`-based check let through |
 
 The known-answer tests are the first two rows: `src/ff1.test.ts` for the cipher, `src/rank.test.ts`
@@ -418,7 +434,7 @@ contrast audit against a checked-in baseline, and a horizontal-overflow check fo
 reflow. Uncaught page errors fail the run. Nothing is injected into the page and no disclosure is
 opened from script, so the rendering that is scanned is the rendering a reader actually gets.
 
-**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **48 tests** asking a different
+**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **56 tests** asking a different
 question from the unit tests: does the page tell the truth about what it computed? The rule that
 makes them worth anything is that each compares two values the *page* printed, or re-derives a
 claim from the page's own inputs by a different route than the source takes. The independent

@@ -970,6 +970,40 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
   await expect(page.locator('#swap-body tr')).not.toHaveCount(0);
   await scanAt('substitution run — refused and accepted rows in one table');
 
+  // ── The authenticated mode ──────────────────────────────────────────────
+  // The refusal first: a phone number cannot carry a tag, and the error tone in
+  // that panel appears nowhere else.
+  await page.fill('#auth-passphrase', 'correct horse battery staple');
+  await page.fill('#auth-message', 'hi');
+  await page.click('#auth-seal');
+  await settleStatus(page, 'auth-status');
+  await expect(page.locator('#auth-status-text')).toContainText('does not fit');
+  await scanAt('authenticated mode refusing a format too narrow for a tag');
+
+  await choosePreset(page, 'base64', '[A-Za-z0-9+/]{64}');
+  await page.fill('#auth-message', 'meet at six');
+  await page.click('#auth-seal');
+  await settleStatus(page, 'auth-status');
+  await expect(page.locator('#auth-out')).not.toHaveClass(/is-empty/);
+  await scanAt('sealed — an authenticated string with nothing travelling beside it');
+
+  await openDisclosure(page, '#auth-trace');
+  await expect(page.locator('#auth-trace-list li')).toHaveCount(7);
+  await scanAt('authenticated step trace open — seven values, no salt among them');
+  await closeDisclosure(page, '#auth-trace');
+
+  await page.click('#auth-open');
+  await settleStatus(page, 'auth-status');
+  await expect(page.locator('#auth-status-text')).toContainText('Opened');
+  await scanAt('opened — the receiver resynchronised without being told the counter');
+
+  await page.click('#auth-attack');
+  await settleStatus(page, 'auth-status');
+  await expect(page.locator('#auth-status-text')).toContainText('0 accepted');
+  await scanAt('the substitution attack refused outright by the tag');
+
+  await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
+
   // ── The guided path ─────────────────────────────────────────────────────
   await page.click('#tour-start');
   await expect(page.locator('#tour-panel')).toBeVisible();

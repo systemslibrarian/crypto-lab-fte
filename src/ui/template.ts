@@ -699,8 +699,123 @@ export function template(): string {
         </div>
       </section>
 
+      <section class="panel" aria-labelledby="fix-heading">
+        <span class="panel-kicker">8 · THE FIX</span>
+        <h2 id="fix-heading">What production would actually require</h2>
+        <p>
+          The three limitations above are not unfixable &mdash; they are unfixed, which is a
+          different thing. This panel is the same lab with the fixes applied, running beside the
+          unauthenticated pipeline rather than replacing it, because a mode that has a MAC cannot
+          demonstrate what happens to one that does not.
+        </p>
+
+        <ol class="fixlist">
+          <li><strong>Encrypt-then-MAC.</strong> HMAC-SHA256 over the counter and the ciphertext, truncated, carried inside the enciphered payload and verified before the plaintext is touched at all.</li>
+          <li><strong>One failure, always.</strong> Wrong string, wrong key, wrong counter, bad padding &mdash; every refusal is the same error with the same words. The unauthenticated decoder tells you <em>which</em> check caught you, which is an oracle you can watch it leak in the panel above.</li>
+          <li><strong>A key schedule.</strong> PBKDF2 runs once to stand in for a handshake; every message after that is HKDF, with a ratchet so each message key is independent.</li>
+          <li><strong>Nothing beside the string.</strong> The FF1 tweak comes from a counter both sides keep, so the 16-byte salt the mode above must ship out of band disappears. The counter is never transmitted either &mdash; which also saves the 32 bits a sequence number would cost.</li>
+          <li><strong>Fixed-size padding, and n never grows.</strong> Every message becomes the same number of bytes, so the wire length stops being a function of the message length. A message that does not fit is refused, not accommodated.</li>
+          <li><strong>Branchless ranking.</strong> The unranking walk no longer branches on the secret index. Read the caveat below &mdash; this is a real reduction, not a guarantee.</li>
+        </ol>
+
+        <h3>What it costs</h3>
+        <p>
+          A tag has to live inside the payload, because every character of the stego string is
+          already spoken for by the regex. So authentication competes with the message for the
+          format's capacity, and narrow formats simply lose. This table is computed live from the
+          same count table everything else on this page uses.
+        </p>
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Authenticated capacity budget, scrollable">
+          <table>
+            <caption id="budget-caption">Longest message that fits, once the frame byte and a tag are paid for.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Format</th>
+                <th scope="col">Capacity</th>
+                <th scope="col">Unauthenticated</th>
+                <th scope="col">128-bit tag</th>
+                <th scope="col">64-bit tag</th>
+                <th scope="col">32-bit tag</th>
+              </tr>
+            </thead>
+            <tbody id="budget-body"></tbody>
+          </table>
+        </div>
+        <p class="field-note" id="budget-note">&nbsp;</p>
+
+        <h3>Run it</h3>
+        <div class="field">
+          <label for="auth-tag">Tag size</label>
+          <select id="auth-tag">
+            <option value="16">128-bit — forgery odds 1 in 2^128</option>
+            <option value="8" selected>64-bit — forgery odds 1 in 2^64</option>
+            <option value="4">32-bit — forgery odds 1 in 2^32</option>
+          </select>
+          <p class="field-note" id="auth-tag-note">&nbsp;</p>
+        </div>
+
+        <div class="field">
+          <label for="auth-message">Message</label>
+          <input id="auth-message" type="text" spellcheck="false" autocomplete="off" />
+          <p class="field-note" id="auth-message-note">&nbsp;</p>
+        </div>
+
+        <div class="field">
+          <label for="auth-passphrase">Passphrase</label>
+          <input id="auth-passphrase" type="password" autocomplete="new-password" />
+          <p class="field-note">PBKDF2 runs once for this passphrase, not once per message. Every message after the first is HKDF, which is microseconds.</p>
+        </div>
+
+        <div class="field">
+          <label for="auth-counter">Message counter</label>
+          <input id="auth-counter" type="number" min="0" max="100000" step="1" value="0"
+            aria-describedby="auth-counter-note" />
+          <p class="field-note" id="auth-counter-note">Never transmitted. The receiver searches forward from its own counter to resynchronise.</p>
+        </div>
+
+        <div class="button-row">
+          <button id="auth-seal" type="button" class="primary">Seal</button>
+          <button id="auth-open" type="button">Open it back</button>
+          <button id="auth-attack" type="button">Run the substitution attack on it</button>
+        </div>
+
+        <p class="status" id="auth-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="auth-status-text">Idle.</span>
+        </p>
+
+        <h3>Sealed string</h3>
+        <output id="auth-out" class="mono-out is-empty" for="auth-seal auth-message">Nothing sealed yet.</output>
+        <p class="hint" id="auth-oob">Nothing travels beside it. Compare with the unauthenticated mode, which must ship a pattern, an n and a 16-byte salt out of band.</p>
+
+        <details class="trace" id="auth-trace">
+          <summary>Step trace — the authenticated pipeline</summary>
+          <div>
+            <ol class="trace-list" id="auth-trace-list">
+              <li><span class="trace-step">Nothing sealed yet</span></li>
+            </ol>
+          </div>
+        </details>
+
+        <p class="callout" id="auth-verdict">Seal something, then attack it.</p>
+
+        <div class="limit">
+          <h3>The honest caveat on item 6</h3>
+          <p>
+            Branchless is not constant-time, and calling it that would be exactly the kind of claim
+            this page exists to avoid. What is gone is the secret-dependent <em>control flow</em>:
+            the unranking walk used to break out of its loop as soon as the remaining index landed
+            inside a run, so the trip count carried the secret. Now every position visits every run
+            and the choice is made by arithmetic. What remains is that <strong>BigInt is
+            variable-time and allocates</strong> &mdash; arithmetic on a small remainder is
+            measurably faster than on a large one, and the JIT may reintroduce branches when it
+            specialises the code. Closing that needs fixed-width limb arithmetic over typed arrays
+            with hand-rolled carries. Against a local or co-resident attacker, do not rely on this.
+          </p>
+        </div>
+      </section>
+
       <section class="panel refs" aria-labelledby="refs-heading">
-        <span class="panel-kicker">8 · SOURCES</span>
+        <span class="panel-kicker">9 · SOURCES</span>
         <h2 id="refs-heading">References</h2>
         <ol>
           <li>

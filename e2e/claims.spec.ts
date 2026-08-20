@@ -1092,3 +1092,143 @@ test.describe('the substitution attack runs for real', () => {
     await expect(page.locator('#swap-verdict')).toContainText('Nothing substituted yet');
   });
 });
+
+/**
+ * The authenticated mode. The claim it makes is the strongest on the page — a
+ * MAC stops the substitution attack the mode above cannot — so the oracle is
+ * the attack itself, run against both modes, plus arithmetic the page never
+ * takes that route to.
+ */
+test.describe('the authenticated mode does what the limitations say is missing', () => {
+  const BASE64 = '[A-Za-z0-9+/]{64}';
+
+  async function seal(page: Page, message: string, tag = '16'): Promise<string> {
+    await page.selectOption('#preset', 'base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.selectOption('#auth-tag', tag);
+    await page.fill('#auth-message', message);
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('Sealed at counter');
+    return text(page, 'auth-out');
+  }
+
+  test('the budget table matches the arithmetic, and refuses what it says it refuses', async ({
+    page
+  }) => {
+    await boot(page);
+    const rows = await page.locator('#budget-body tr').evaluateAll((trs) =>
+      trs.map((tr) => Array.from(tr.children).map((c) => (c.textContent ?? '').trim()))
+    );
+    expect(rows).toHaveLength(4);
+
+    for (const [, capacity, , tag128, tag64, tag32] of rows) {
+      const bits = Number(/^(\d+) bits$/.exec(capacity)![1]);
+      const whole = Math.floor(bits / 8);
+      // Independent oracle: payload bytes minus frame byte minus tag minus the
+      // one byte padding always costs. The page never spells it out this way.
+      for (const [tagBytes, cell] of [[16, tag128], [8, tag64], [4, tag32]] as const) {
+        const expected = whole - 1 - tagBytes - 1;
+        if (expected >= 1) expect(cell).toBe(`${expected} bytes`);
+        else expect(cell).toBe('does not fit');
+      }
+    }
+  });
+
+  test('a phone number is refused, and the refusal shows the arithmetic', async ({ page }) => {
+    await boot(page);
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.fill('#auth-message', 'hi');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('does not fit');
+    await expect(page.locator('#auth-status-text')).toContainText('4 whole bytes');
+    await expect(page.locator('#auth-out')).toHaveClass(/is-empty/);
+  });
+
+  test('the sealed string is a member of the language, and nothing travels with it', async ({
+    page
+  }) => {
+    await boot(page);
+    const sealed = await seal(page, 'meet at six');
+    expect(new RegExp(`^(?:${BASE64})$`).test(sealed), sealed).toBe(true);
+    // No salt anywhere in this panel — that is the whole of item 4.
+    await expect(page.locator('#auth-oob')).toContainText('Nothing travels beside it');
+    expect(await page.locator('#auth-trace-list').textContent()).toContain('not shipped');
+  });
+
+  test('the wire length is constant across message sizes — the length leak is closed', async ({
+    page
+  }) => {
+    await boot(page);
+    const lengths = new Set<number>();
+    for (const message of ['a', 'hello', 'x'.repeat(25)]) {
+      lengths.add((await seal(page, message)).length);
+    }
+    expect(lengths.size, `wire lengths: ${[...lengths].join(', ')}`).toBe(1);
+  });
+
+  test('n is never grown — an over-long message is refused, not accommodated', async ({ page }) => {
+    await boot(page);
+    await seal(page, 'ok');
+    await page.fill('#auth-message', 'x'.repeat(40));
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('leaves room for');
+    expect(await page.inputValue('#length')).toBe('64');
+  });
+
+  test('the receiver resynchronises without being told the counter', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.fill('#auth-message', 'gap');
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.fill('#auth-counter', '6');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await page.click('#auth-open');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('Opened "gap"');
+    await expect(page.locator('#auth-status-text')).toContainText('found counter 6');
+    await expect(page.locator('#auth-status-text')).toContainText('without being told');
+  });
+
+  /**
+   * The headline. The unauthenticated panel accepts roughly one substitution in
+   * thirty; this must accept none. Both are run in the same browser session so
+   * the comparison is like for like.
+   */
+  test('the substitution attack that beats the unauthenticated mode is refused outright', async ({
+    page
+  }) => {
+    await boot(page);
+
+    // First, the unauthenticated mode, so the contrast is measured not assumed.
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+    const pastFrame = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-utf8'))!;
+    const accepted = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-accepted'))!;
+    // Substitutions got past the frame byte in the unauthenticated mode.
+    expect(Number(pastFrame[1]) + Number(accepted[1])).toBeGreaterThan(0);
+
+    // Now the same attack against the sealed string.
+    await seal(page, 'secret');
+    await page.click('#auth-attack');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('60 substitutions, 0 accepted');
+    await expect(page.locator('#auth-verdict')).toContainText('one in 2^128');
+  });
+
+  test('the page does not claim the branchless ranking is constant-time', async ({ page }) => {
+    await boot(page);
+    const caveat = (await page.locator('#fix-heading').locator('..').textContent()) ?? '';
+    expect(caveat).toContain('Branchless is not constant-time');
+    expect(caveat).toContain('BigInt is');
+    expect(caveat).toContain('variable-time');
+  });
+});

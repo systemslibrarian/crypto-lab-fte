@@ -39,6 +39,17 @@ import {
 import { Round, buildRound, realismFor, scoreRound } from "../decoys.ts";
 import { Ladder, buildLadder, bytesConsistentWith, ladderReadout } from "../lengths.ts";
 import { runSubstitutions } from "../substitute.ts";
+import {
+  AuthError,
+  CapacityError,
+  SealResult,
+  TAG_CHOICES,
+  TagBytes,
+  budget,
+  open as authOpen,
+  seal as authSeal
+} from "../aead.ts";
+import { deriveRoot } from "../schedule.ts";
 import { FF1_VECTORS, VectorRun, runVector, tally } from "../vectors.ts";
 import { assertNoSecrets, decodeState, encodeState } from "../share.ts";
 import { CurveInput, WalkInput, renderCurve, renderWalk, walkReadout } from "./charts.ts";
@@ -64,6 +75,11 @@ interface State {
   tourStep: number | null;
   /** True once the reader edits the classifier away from the format regex. */
   classifierPinned: boolean;
+  /** PBKDF2 output, cached so it runs once per passphrase rather than per message. */
+  authRoot: Uint8Array | null;
+  /** The passphrase `authRoot` belongs to, so a change invalidates it. */
+  authRootFor: string | null;
+  lastSeal: SealResult | null;
 }
 
 const state: State = {
@@ -75,7 +91,10 @@ const state: State = {
   round: null,
   revealed: false,
   tourStep: null,
-  classifierPinned: false
+  classifierPinned: false,
+  authRoot: null,
+  authRootFor: null,
+  lastSeal: null
 };
 
 const GAME_GENERATED = 4;
@@ -85,6 +104,8 @@ const LADDER_BYTES = 12;
 /** Substitutions per run. ~1s in the browser: PBKDF2 runs once, not per trial. */
 const SWAP_TRIALS = 60;
 const SWAP_SHOWN = 8;
+/** Substitutions fired at the authenticated string. All must be refused. */
+const AUTH_ATTACK_TRIALS = 60;
 
 function $<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -445,6 +466,7 @@ function afterCompile(): void {
   renderCapacityBar();
   renderCurvePanel();
   renderLadder();
+  renderBudget();
   syncClassifierPattern();
   clearGame();
   setStatus("game-status", "idle", "Deal a round to play.");
@@ -1383,6 +1405,245 @@ async function runSwap(): Promise<void> {
   }
 }
 
+// ── The authenticated mode ──────────────────────────────────────────────────
+
+function currentTagBytes(): TagBytes {
+  const raw = Number(($("auth-tag") as HTMLSelectElement).value);
+  return (TAG_CHOICES as readonly number[]).includes(raw) ? (raw as TagBytes) : 8;
+}
+
+/**
+ * The budget table: why a phone number cannot carry an authenticated message.
+ *
+ * Every figure comes from `budget()`, the same function `seal` refuses on, so
+ * the table cannot promise a message size the encoder would then reject.
+ */
+/**
+ * Capacity per preset, compiled once and remembered.
+ *
+ * The presets never change, but this runs on every recompile — which is every
+ * keystroke in the pattern box. Compiling four DFAs and their count tables each
+ * time (twice each, as the first draft did) is real work to repeat for a
+ * constant.
+ */
+const capacityMemo = new Map<string, number>();
+
+function presetCapacity(id: string, pattern: string, n: number, declared: number): number {
+  const cached = capacityMemo.get(id);
+  if (cached !== undefined) return cached;
+  let bits = declared;
+  try {
+    const counts = compileFormat(pattern).counts;
+    if (counts[n] !== undefined) bits = capacityBitsOf(counts[n]);
+  } catch {
+    // Fall back to the label, which `e2e/claims.spec.ts` pins to the live DFA.
+  }
+  capacityMemo.set(id, bits);
+  return bits;
+}
+
+function renderBudget(): void {
+  const body = $("budget-body");
+  body.textContent = "";
+
+  for (const preset of PRESETS) {
+    const capacityBits = presetCapacity(preset.id, preset.pattern, preset.n, preset.bits);
+
+    const tr = document.createElement("tr");
+    if (state.format?.pattern === preset.pattern) tr.className = "is-chosen";
+
+    const head = document.createElement("th");
+    head.scope = "row";
+    head.textContent = preset.label;
+    tr.appendChild(head);
+
+    const cells = [`${capacityBits} bits`, `${Math.floor(capacityBits / 8) - 1} bytes`];
+    for (const tagBytes of TAG_CHOICES) {
+      const b = budget(capacityBits, tagBytes);
+      cells.push(b.fits ? `${b.maxMessageBytes} bytes` : "does not fit");
+    }
+    for (const text of cells) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+
+  const tagBytes = currentTagBytes();
+  const format = state.format;
+  const note = $("budget-note");
+  if (!format) {
+    note.textContent = "No automaton — fix the pattern above.";
+    return;
+  }
+  const b = budget(capacityBitsOf(format.counts[state.n] ?? 0n), tagBytes);
+  note.textContent = b.fits
+    ? `Your current format and n hold ${b.maxMessageBytes} bytes of authenticated message: ${b.payloadBytes} whole bytes of capacity, minus the frame byte, minus a ${tagBytes}-byte tag, minus the one byte padding always costs.`
+    : `Your current format cannot carry an authenticated message at this tag size: ${b.payloadBytes} whole bytes of capacity against ${b.overheadBytes} of overhead. Switch to hex or base64, or shorten the tag.`;
+  $("auth-tag-note").textContent = `A ${8 * tagBytes}-bit tag gives a forger one chance in 2^${8 * tagBytes} per attempt.`;
+}
+
+/** PBKDF2 once per passphrase. Item 3, made visible in the status line. */
+async function rootFor(passphrase: string): Promise<Uint8Array> {
+  if (state.authRoot && state.authRootFor === passphrase) return state.authRoot;
+  setStatus(
+    "auth-status",
+    "working",
+    `New passphrase — running PBKDF2 once (${PBKDF2_ITERATIONS.toLocaleString("en-US")} iterations). Every message after this is HKDF.`
+  );
+  const root = await deriveRoot(passphrase);
+  state.authRoot = root;
+  state.authRootFor = passphrase;
+  return root;
+}
+
+function renderAuthTrace(result: SealResult): void {
+  const list = $("auth-trace-list");
+  list.textContent = "";
+  const steps: Array<[string, string]> = [
+    ["Root key, then HKDF ratcheted to this counter", `counter ${result.counter} · AES key ${abbreviate(result.trace.aesKeyHex)}`],
+    ["FF1 tweak, derived from the counter — not shipped", result.trace.tweakHex],
+    [`AES-CTR over a fixed ${result.trace.plaintextBytes}-byte padded block`, abbreviate(result.trace.ciphertextHex)],
+    [`HMAC-SHA256 over counter ‖ ciphertext, truncated to ${result.trace.tagBytes} bytes`, result.trace.tagHex],
+    ["Framed 0x01 ‖ ciphertext ‖ tag, read big-endian", `${abbreviate(result.trace.integer.toString())}`],
+    [`FF1 cycle-walked into [0, N), N = ${formatBig(result.total)}`, `${result.trace.walkSteps} application${result.trace.walkSteps === 1 ? "" : "s"}`],
+    ["Unranked branchlessly through the DFA", abbreviate(result.stego, 14)]
+  ];
+  for (const [step, value] of steps) {
+    const li = document.createElement("li");
+    const stepEl = document.createElement("span");
+    stepEl.className = "trace-step";
+    stepEl.textContent = step;
+    const valueEl = document.createElement("span");
+    valueEl.className = "trace-value";
+    valueEl.textContent = value;
+    li.append(stepEl, valueEl);
+    list.appendChild(li);
+  }
+}
+
+async function runSeal(): Promise<void> {
+  const format = state.format;
+  if (!format) return;
+  const message = ($("auth-message") as HTMLInputElement).value;
+  const passphrase = ($("auth-passphrase") as HTMLInputElement).value;
+  const counter = Number(($("auth-counter") as HTMLInputElement).value);
+  if (passphrase.length === 0) {
+    setStatus("auth-status", "error", "A passphrase is required.");
+    return;
+  }
+
+  const button = $("auth-seal") as HTMLButtonElement;
+  button.disabled = true;
+  try {
+    const root = await rootFor(passphrase);
+    setStatus("auth-status", "working", "Sealing…");
+    const result = await authSeal({
+      format,
+      n: state.n,
+      root,
+      counter,
+      message,
+      tagBytes: currentTagBytes()
+    });
+    state.lastSeal = result;
+    setOutput("auth-out", result.stego, false);
+    renderAuthTrace(result);
+    ($("auth-message-note")).textContent =
+      `${new TextEncoder().encode(message).length} bytes, padded to ${result.budget.plaintextBytes}. Every message in this mode produces a string of exactly ${result.stego.length} characters.`;
+    setStatus(
+      "auth-status",
+      "ok",
+      `Sealed at counter ${result.counter}. Nothing else travels — no salt, no sequence number.`
+    );
+    $("auth-verdict").textContent = "Now attack it. The unauthenticated mode accepted about one substitution in thirty.";
+  } catch (error) {
+    state.lastSeal = null;
+    setOutput("auth-out", "Nothing sealed.", true);
+    setStatus(
+      "auth-status",
+      "error",
+      error instanceof CapacityError ? error.message : (error as Error).message
+    );
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runOpen(): Promise<void> {
+  const format = state.format;
+  const sealed = state.lastSeal;
+  if (!format || !sealed) {
+    setStatus("auth-status", "error", "Seal something first.");
+    return;
+  }
+  const button = $("auth-open") as HTMLButtonElement;
+  button.disabled = true;
+  try {
+    const root = await rootFor(($("auth-passphrase") as HTMLInputElement).value);
+    // Deliberately from zero, to show the receiver resynchronising without
+    // being told the counter.
+    const opened = await authOpen(format, sealed.stego, root, 0, currentTagBytes());
+    setStatus(
+      "auth-status",
+      "ok",
+      `Opened "${opened.message}" — the receiver started at 0 and found counter ${opened.counter} after ${opened.searched} attempt${opened.searched === 1 ? "" : "s"}, without being told it.`
+    );
+  } catch (error) {
+    setStatus("auth-status", "error", (error as AuthError).message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * The same attack the unauthenticated panel runs, pointed at the sealed string.
+ * The comparison is the whole point, so the wording quotes both outcomes.
+ */
+async function runAuthAttack(): Promise<void> {
+  const format = state.format;
+  const sealed = state.lastSeal;
+  if (!format || !sealed) {
+    setStatus("auth-status", "error", "Seal something first — the attack needs a string to replace.");
+    return;
+  }
+  const button = $("auth-attack") as HTMLButtonElement;
+  button.disabled = true;
+  setStatus("auth-status", "working", `Substituting ${AUTH_ATTACK_TRIALS} times…`);
+  try {
+    const root = await rootFor(($("auth-passphrase") as HTMLInputElement).value);
+    const table = buildCountTable(format.dfa, sealed.n);
+    const tagBytes = currentTagBytes();
+
+    let accepted = 0;
+    for (let i = 0; i < AUTH_ATTACK_TRIALS; i += 1) {
+      const candidate = unrank(format.dfa, table, randomBelow(table.total));
+      if (candidate === sealed.stego) continue;
+      try {
+        await authOpen(format, candidate, root, 0, tagBytes, 4);
+        accepted += 1;
+      } catch {
+        // Refused, as it must be.
+      }
+    }
+
+    $("auth-verdict").textContent =
+      accepted === 0
+        ? `${AUTH_ATTACK_TRIALS} substitutions, ${accepted} accepted. The unauthenticated mode above accepts roughly one in thirty of exactly the same attack; a ${8 * tagBytes}-bit tag puts the odds at one in 2^${8 * tagBytes} per attempt. That difference is the entire content of the third limitation.`
+        : `${accepted} of ${AUTH_ATTACK_TRIALS} substitutions were ACCEPTED. That must not happen — at a ${8 * tagBytes}-bit tag the expected count is essentially zero. Something is wrong.`;
+    setStatus(
+      "auth-status",
+      accepted === 0 ? "ok" : "error",
+      `${AUTH_ATTACK_TRIALS} substitutions, ${accepted} accepted.`
+    );
+  } catch (error) {
+    setStatus("auth-status", "error", (error as Error).message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 function debounce(fn: () => void, ms: number): () => void {
@@ -1534,6 +1795,18 @@ export function initUI(root: HTMLElement): void {
 
   // ── Spot the fake ─────────────────────────────────────────────────────────
   $("swap-run").addEventListener("click", () => void runSwap());
+
+  // ── The authenticated mode ────────────────────────────────────────────────
+  $("auth-seal").addEventListener("click", () => void runSeal());
+  $("auth-open").addEventListener("click", () => void runOpen());
+  $("auth-attack").addEventListener("click", () => void runAuthAttack());
+  ($("auth-tag") as HTMLSelectElement).addEventListener("change", renderBudget);
+  ($("auth-passphrase") as HTMLInputElement).addEventListener("input", () => {
+    // A changed passphrase invalidates the cached root; the next seal pays
+    // PBKDF2 again, and only then.
+    state.authRoot = null;
+    state.authRootFor = null;
+  });
   $("game-deal").addEventListener("click", dealRound);
   $("game-reveal").addEventListener("click", revealRound);
 
@@ -1563,6 +1836,7 @@ export function initUI(root: HTMLElement): void {
   presetSelect.value = sharedPreset ? sharedPreset.id : PRESETS[0].id;
   ($("encode-message") as HTMLTextAreaElement).value = shared.message ?? "hi";
   ($("quick-message") as HTMLInputElement).value = shared.message ?? "hi";
+  ($("auth-message") as HTMLInputElement).value = "meet at six";
   applyPreset(presetSelect.value);
 
   // A shared pattern may be a custom one, and a shared n may differ from the
