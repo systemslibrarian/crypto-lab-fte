@@ -103,6 +103,12 @@ jobs:
 
   # Dependabot only. Runs after the gate above, so a bump can only merge itself
   # if this lab's own tests, build, claims suite and axe run went green on the PR.
+  #
+  # This job lives here, in the workflow that actually runs the gate, and not in
+  # a reusable workflow: a called workflow cannot request more permission than
+  # its caller grants, and `contents: write` inside one kills the whole deploy at
+  # startup with nothing but "workflow file issue" to go on. `build` is the only
+  # job that runs on pull_request, so `needs: build` names the entire gate.
   dependabot-auto-merge:
     needs: build
     if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
@@ -111,8 +117,47 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v3
+
+      # Majors are included here on purpose. `needs:` above already required the
+      # whole gate -- tsc, the FF1/DFA/rank unit suites, the build, the claims
+      # suite and the axe WCAG run -- and that judges a bump far better than its
+      # version number does. A major that actually breaks this lab fails the gate
+      # and the PR stays open for a human. What keeps majors from arriving inside
+      # an unmergeable grouped PR is dependabot.yml, not this job.
       - name: Merge any bump whose gate went green
-        run: gh pr merge --squash --delete-branch "$PR_URL"
+        # Retry: a sibling PR merging first moves main underneath us and GitHub
+        # rejects with "Base branch was modified". That race is benign, so try
+        # again rather than failing the run over it.
+        run: |
+          for attempt in 1 2 3; do
+            if gh pr merge --squash --delete-branch "$PR_URL"; then
+              exit 0
+            fi
+            echo "merge attempt $attempt failed; base branch may have moved - retrying"
+            sleep 15
+          done
+          echo "::warning::gate passed but the merge did not land after 3 attempts;"
+          echo "::warning::leaving this PR open - Dependabot will rebase and retry."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # A merge made with GITHUB_TOKEN raises no push event -- GitHub suppresses
+      # them so a workflow cannot retrigger itself -- so the `on: push` deploy
+      # above never runs after an auto-merge: the bump lands on main and Pages
+      # keeps serving the previous build, with no red run anywhere to say so.
+      # Ask for the deploy explicitly; a workflow_dispatch through the API is not
+      # suppressed. The dispatched run is this same gate-then-deploy pipeline, so
+      # a bad merge still ships nothing.
+      - name: Deploy the merged result
+        if: success()
+        run: |
+          if gh pr view "$PR_URL" --json state --jq .state | grep -q MERGED; then
+            gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main \
+              || echo "::warning::deploy dispatch failed; run pages.yml by hand"
+          fi
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
