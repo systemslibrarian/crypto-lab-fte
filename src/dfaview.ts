@@ -287,6 +287,7 @@ export function renderDfa(svg: SVGSVGElement, dfa: Dfa, maxStates = 64): RenderR
       const path = el("path", {
         d: `M ${a.x - 10} ${a.y - NODE_R} C ${a.x - 44} ${a.y - 66}, ${a.x + 44} ${a.y - 66}, ${a.x + 10} ${a.y - NODE_R}`,
         class: "dfa-edge",
+        "data-edge": `${e.from}->${e.to}`,
         "marker-end": "url(#dfa-arrow)"
       });
       edgeLayer.appendChild(path);
@@ -311,6 +312,7 @@ export function renderDfa(svg: SVGSVGElement, dfa: Dfa, maxStates = 64): RenderR
     const path = el("path", {
       d: `M ${start.x} ${start.y} Q ${mid.x} ${mid.y} ${end.x} ${end.y}`,
       class: "dfa-edge",
+      "data-edge": `${e.from}->${e.to}`,
       "marker-end": "url(#dfa-arrow)"
     });
     edgeLayer.appendChild(path);
@@ -330,6 +332,7 @@ export function renderDfa(svg: SVGSVGElement, dfa: Dfa, maxStates = 64): RenderR
       cx: p.x,
       cy: p.y,
       r: NODE_R,
+      "data-state": q,
       class: q === dfa.start ? "dfa-node dfa-node-start" : "dfa-node"
     });
     nodeLayer.appendChild(circle);
@@ -344,4 +347,60 @@ export function renderDfa(svg: SVGSVGElement, dfa: Dfa, maxStates = 64): RenderR
   }
 
   return { rendered: true, engine, states: dfa.numStates, edges: edges.length };
+}
+
+// ── Path highlighting ───────────────────────────────────────────────────────
+
+/**
+ * Light up the route one string takes through the drawing.
+ *
+ * The graph and the stego string are the two strongest things on the page and
+ * they used to ignore each other. Highlighting closes that: the reader watches
+ * their own phone number walk the automaton one character at a time, and the
+ * count table stops being an abstraction about "the language" and becomes an
+ * account of the paths through this picture.
+ *
+ * Highlighting is applied as classes on elements the render pass already
+ * tagged, so it costs no relayout and cannot move a node. It is also purely
+ * additive — the underlying drawing is unchanged and `clearHighlight` restores
+ * it exactly, which matters because the graph is `role="img"` with a fixed text
+ * alternative that must stay true whatever is lit up.
+ */
+export function clearHighlight(svg: SVGSVGElement): void {
+  for (const node of svg.querySelectorAll(".is-on-path, .is-current")) {
+    node.classList.remove("is-on-path", "is-current");
+  }
+}
+
+export interface HighlightInput {
+  /** States visited, in order. */
+  states: number[];
+  /** Directed edges used, as "from->to". */
+  edges: Set<string>;
+  /**
+   * Which character the scrubber is on, or null for "show the whole path".
+   * At index i the current state is states[i + 1] — the state reached by
+   * consuming character i.
+   */
+  activeIndex: number | null;
+}
+
+export function highlightPath(svg: SVGSVGElement, input: HighlightInput): void {
+  clearHighlight(svg);
+  if (input.states.length === 0) return;
+
+  for (const state of new Set(input.states)) {
+    svg.querySelector(`[data-state="${state}"]`)?.classList.add("is-on-path");
+  }
+  for (const edge of input.edges) {
+    for (const path of svg.querySelectorAll(`[data-edge="${edge}"]`)) {
+      path.classList.add("is-on-path");
+    }
+  }
+
+  const cursor =
+    input.activeIndex === null
+      ? input.states[input.states.length - 1]
+      : input.states[Math.min(input.activeIndex + 1, input.states.length - 1)];
+  svg.querySelector(`[data-state="${cursor}"]`)?.classList.add("is-current");
 }

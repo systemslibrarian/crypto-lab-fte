@@ -10,51 +10,24 @@ import {
   importFf1Key,
   walkWidth
 } from "./ff1.ts";
-
-const R10 = "0123456789";
-const R36 = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-function toSymbols(text: string, alphabet: string): Uint8Array {
-  return Uint8Array.from(Array.from(text, (ch) => alphabet.indexOf(ch)));
-}
-function fromSymbols(symbols: Uint8Array, alphabet: string): string {
-  return Array.from(symbols, (s) => alphabet[s]).join("");
-}
+import { FF1_VECTORS, runAllVectors, runVector, tally } from "./vectors.ts";
 
 /**
  * The nine sample vectors published by NIST alongside SP 800-38G. They pin the
  * exact ciphertext for AES-128/192/256 at radix 10 and 36, so any regression in
  * the round function, the P block, the Q padding or the split fails the build.
+ *
+ * The list itself lives in `src/vectors.ts` because the Sources panel runs the
+ * same nine in the browser. One definition, so a vector cannot be quietly
+ * adjusted here to make a red test green while the page keeps claiming NIST.
  */
 describe("FF1 known-answer tests (NIST SP 800-38G sample vectors)", () => {
-  const K128 = "2b7e151628aed2a6abf7158809cf4f3c";
-  const K192 = "2b7e151628aed2a6abf7158809cf4f3cef4359d8d580aa4f";
-  const K256 = "2b7e151628aed2a6abf7158809cf4f3cef4359d8d580aa4f7f036d6f04fc6a94";
-  const TW = "39383736353433323130";
-  const TW36 = "3737373770717273373737";
-  const PT10 = "0123456789";
-  const PT36 = "0123456789abcdefghi";
-
-  const cases: Array<[string, string, number, string, string, string, string]> = [
-    ["S1 AES-128 r10 no tweak", K128, 10, R10, PT10, "", "2433477484"],
-    ["S2 AES-128 r10 tweak", K128, 10, R10, PT10, TW, "6124200773"],
-    ["S3 AES-128 r36 tweak", K128, 36, R36, PT36, TW36, "a9tv40mll9kdu509eum"],
-    ["S4 AES-192 r10 no tweak", K192, 10, R10, PT10, "", "2830668132"],
-    ["S5 AES-192 r10 tweak", K192, 10, R10, PT10, TW, "2496655549"],
-    ["S6 AES-192 r36 tweak", K192, 36, R36, PT36, TW36, "xbj3kv35jrawxv32ysr"],
-    ["S7 AES-256 r10 no tweak", K256, 10, R10, PT10, "", "6657667009"],
-    ["S8 AES-256 r10 tweak", K256, 10, R10, PT10, TW, "1001623463"],
-    ["S9 AES-256 r36 tweak", K256, 36, R36, PT36, TW36, "xs8a0azh2avyalyzuwd"]
-  ];
-
-  for (const [name, keyHex, radix, alphabet, pt, tweakHex, expected] of cases) {
-    it(name, async () => {
-      const key = await importFf1Key(hexToBytes(keyHex));
-      const tweak = hexToBytes(tweakHex);
-      const ct = await ff1Encrypt(key, radix, toSymbols(pt, alphabet), tweak);
-      expect(fromSymbols(ct, alphabet)).toBe(expected);
-      const back = await ff1Decrypt(key, radix, ct, tweak);
-      expect(fromSymbols(back, alphabet)).toBe(pt);
+  for (const vector of FF1_VECTORS) {
+    it(`${vector.name} — AES-${vector.keyBits}, radix ${vector.radix}${vector.tweakHex ? ", tweaked" : ", no tweak"}`, async () => {
+      const run = await runVector(vector);
+      expect(run.actual).toBe(vector.expected);
+      expect(run.roundTrip).toBe(vector.plaintext);
+      expect(run.pass).toBe(true);
     });
   }
 });
@@ -139,6 +112,40 @@ describe("big-endian helpers", () => {
       expect(Array.from(bigIntToMinimalBytesBE(bytesToBigIntBE(bytes)))).toEqual(
         Array.from(bytes)
       );
+    }
+  });
+});
+
+describe("the in-page vector runner", () => {
+  it("reports a status and a note for every vector, not just a boolean", async () => {
+    for (const vector of FF1_VECTORS) {
+      const run = await runVector(vector);
+      expect(["pass", "fail", "unsupported"]).toContain(run.status);
+      expect(run.note.length).toBeGreaterThan(0);
+      expect(run.pass).toBe(run.status === "pass");
+    }
+  });
+
+  /**
+   * Node's WebCrypto DOES implement AES-192, so all nine run here. A browser
+   * has no AES-192 at all and marks samples 4-6 unsupported — which is exactly
+   * the asymmetry the in-page runner exists to make visible, and the reason
+   * this suite alone cannot vouch for what a visitor sees.
+   */
+  it("runs all nine under Node, where AES-192 is available", async () => {
+    const runs = await runAllVectors();
+    const counts = tally(runs);
+    expect(counts.total).toBe(9);
+    expect(counts.failed).toBe(0);
+    expect(counts.passed + counts.unsupported).toBe(9);
+  });
+
+  it("never reports an unsupported vector as a failure", async () => {
+    const runs = await runAllVectors();
+    for (const run of runs.filter((r) => r.status === "unsupported")) {
+      expect(run.pass).toBe(false);
+      expect(run.actual).toBe("");
+      expect(run.note).toContain("AES-192");
     }
   });
 });

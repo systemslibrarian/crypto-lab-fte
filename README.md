@@ -28,6 +28,13 @@ The exact primitives on this page, all of them running in the browser tab:
 | FF1, radix 2, 10-round Feistel over AES-CBC-MAC | `src/ff1.ts` | permutes `[0, 2^k)`; cycle-walking narrows it to `[0, N)` |
 | PBKDF2-HMAC-SHA256, 600,000 iterations | `src/keys.ts` | one pass over passphrase + 16-byte salt yields 384 bits |
 | AES-256-CTR (WebCrypto) | `src/keys.ts` | the message cipher |
+| Regex DPI classifier | `src/classifier.ts` | the adversary, anchored `^(?:…)$` over three encodings of one ciphertext |
+| NANP / dotted-quad corpora | `src/decoys.ts` | realistic decoys for Spot the fake, and an honest refusal where no corpus exists |
+| NIST SP 800-38G sample vectors | `src/vectors.ts` | the nine known answers, shared by the test suite and the in-page runner |
+| Path tracing | `src/pathtrace.ts` | the route a string walks through the DFA, for the highlighted drawing |
+| Substitution attack | `src/substitute.ts` | swaps the stego string for other language members and runs the receiver's own decode over each |
+| Length ladder | `src/lengths.ts` | message size against the length that appears on the wire — the leak as an observer would tabulate it |
+| Shareable state | `src/share.ts` | pattern, `n`, message and classifier rule in the fragment — never a passphrase or salt |
 
 ### The bijection
 
@@ -96,6 +103,12 @@ thing runs client-side with no backend, no storage of key material, and nothing 
 
 A tour of the interactive panels, numbered as the page numbers them.
 
+0. **Try it now.** A compact encoder in the first viewport: message, passphrase, one button, and
+   the resulting phone number in large type with the classifier's verdict beside it. It owns no
+   cryptography of its own — it drives the same encode path as panel 3 and mirrors the result, so
+   the two physically cannot disagree. On a 390 x 844 phone the field, the button and the result
+   are all above the fold.
+
 1. **Regex and format.** Four presets plus a free-text pattern box. The automaton, the capacity
    arithmetic and the count table recompute as you type (180 ms debounce). The stat row reports
    `|Q|`, alphabet classes, `N` at the chosen `n`, capacity at that `n`, and the smallest `n`
@@ -106,7 +119,10 @@ A tour of the interactive panels, numbered as the page numbers them.
    equivalence class. The status line reports how many states the powerset construction produced
    and how many minimization and trimming left. Above 64 states the graph is not drawn — the
    panel says so, and the transition table in the disclosure below still lists every transition
-   as text.
+   as text. Once something is encoded, **the path that string walks is highlighted on the
+   drawing** — one state per character, driven by a scrubber that names each transition
+   (`q13 -> q12`) and scrolls the current state into view. Every transition the readout claims is
+   cross-checked against the page's own transition table by the claims suite.
 3. **Encode.** Message plus passphrase. PBKDF2 derives both keys from a fresh 16-byte salt, the
    message is AES-CTR encrypted, framed with a leading `0x01`, read big-endian as an integer `I`,
    cycle-walked through FF1 inside `[0, N)`, and unranked into the stego string. A capacity bar
@@ -115,16 +131,56 @@ A tour of the interactive panels, numbered as the page numbers them.
    live inside a string every character of which is spoken for by the regex. A six-step trace
    disclosure shows every intermediate: derived key material, ciphertext hex, `I` and its bit
    length, `N` and its capacity, the FF1 domain width `k` with how many applications the cycle
-   walk took, and the stego string.
-4. **Decode.** Paste a stego string, passphrase and salt; the same pattern ranks the string back
+   walk took, and the stego string. Above that disclosure the same values are laid out as a
+   **pipeline** — message, ciphertext, framed integer `I`, the slice `N`, the FF1 result, the
+   stego string — and the **cycle walk is drawn** as a number line: the wide bar is `[0, 2^k)`,
+   the inner bar is `[0, N)`, and each landing is one FF1 application, the rejected ones sitting
+   visibly outside the inner bar and the last one inside.
+4. **The adversary.** The machine FTE was built for. A regex DPI rule, anchored at both ends,
+   run against three payloads carrying the same ciphertext: the stego string, the raw bytes as
+   hex, and the raw bytes base64'd. The stego string is forwarded; both raw encodings are
+   dropped. The rule is **editable and separate from the format regex** — sharpen it past the
+   format and the stego string is flagged too, and the summary says so, because FTE beats the
+   regex it was compiled against and not every regex.
+5. **Decode.** Paste a stego string, passphrase and salt; the same pattern ranks the string back
    to an integer, FF1 runs backwards through the same cycle walk, and AES-CTR recovers the
    message. A "fill from the encode above" button wires the two panels together.
-5. **The count table.** `C[q0][k]` for `k = 0` to 20, plus the chosen `n` if it is larger, with
+6. **The count table.** `C[q0][k]` for `k = 0` to 20, plus the chosen `n` if it is larger, with
    `floor(log2 C)` beside each row and the active row highlighted. A note prints the estimated
    BigInt storage for the table at the current `n` — computed by the same estimator that enforces
-   the 50 MB ceiling, so the number quoted is the number that would refuse the build.
-6. **Honest limitations.** Three named failures of the construction, reproduced below.
-7. **References and glossary.** The four sources this is built from, and nine terms defined.
+   the 50 MB ceiling, so the number quoted is the number that would refuse the build. Above it, a
+   **capacity curve** plots bits against `n` with the chosen `n` marked and the current message's
+   requirement drawn as a horizontal line, so "the encoder grew `n`" is a crossing point rather
+   than a sentence.
+7. **Honest limitations.** Three named failures of the construction, reproduced below — and all
+   three are now demonstrations rather than prose.
+   *Uniform is not realistic*: **Spot the fake** deals four real unrankings against four realistic
+   decoys and asks you to pick the generated ones, then names the tell in each — an unassigned
+   area code, an N11 service code, a leading-zero exchange. On the hex and base64 presets it
+   declines to deal and says why: there is no such thing as a realistic random hex string, which
+   is exactly why those formats are the easy case and the phone number is the hard one.
+   *Length leakage*: **what the wire sees** is the ladder an observer builds from a character
+   count alone — message size, payload bits, the `n` the encoder picks, and which other message
+   sizes are indistinguishable from it. The four presets are fixed-length and leak nothing;
+   `[0-9a-f]{1,64}` separates every single size.
+   *No authentication*: **substitute the string** performs the attack. Your stego string is
+   replaced sixty times with other real members of the same language, each handed to the
+   receiver's own decode under your passphrase and salt. Most are refused by the frame byte, some
+   by the UTF-8 check, and roughly one in thirty is **accepted and handed over as a message you
+   never sent**. The measured share getting past the frame byte is printed beside the closed-form
+   prediction — about 42% against 43.1% on the phone format — which is two independent routes to
+   the number the paragraph above claims. PBKDF2 runs once for the whole run, not per trial.
+8. **References and glossary.** The four sources this is built from, nine terms defined, and a
+   **known-answer panel that runs the NIST vectors in your browser**. Six of the nine run; the
+   other three use AES-192, which WebCrypto does not implement in any browser, so they are marked
+   UNSUPPORTED rather than failed and are covered by the Node suite. That split is worth noticing:
+   a green CI run on Node says nothing about what a visitor's browser can reproduce.
+
+Across the top: a **guided path** of seven steps that ends deliberately on the honest limitations
+rather than on the encode that makes the construction look good, and a **copy-link button** that
+puts the pattern, `n`, the message and the classifier rule in the URL fragment. The passphrase and
+the salt are never written to the URL — `assertNoSecrets` refuses the write, and the claims suite
+performs a real encode and greps the resulting URL for both.
 
 Changing the pattern or `n` **retires** any stego string on screen and says so: a stego string
 belongs to exactly one `(pattern, n)` pair, and leaving a plausible-looking string that quietly
@@ -310,14 +366,20 @@ build-time secret; opening `dist/index.html` through any static server is enough
 
 ## Build & Verify
 
-`npm test` runs **48 tests across 4 files** (about 9 seconds; the bulk of it is PBKDF2, which is the point):
+`npm test` runs **102 tests across 10 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
 
 | File | Tests | What it pins down |
 | --- | --- | --- |
-| `src/ff1.test.ts` | 16 | **All nine NIST SP 800-38G sample vectors** (S1-S9: AES-128/192/256, radix 10 and 36, with and without tweak), FF1 at radix 2 as a genuine permutation of `{0,1}^k`, cycle-walking injective and round-tripping on a non-power-of-two domain, refusal below the `10^6` domain floor |
+| `src/ff1.test.ts` | 19 | **All nine NIST SP 800-38G sample vectors** (S1-S9: AES-128/192/256, radix 10 and 36, with and without tweak), FF1 at radix 2 as a genuine permutation of `{0,1}^k`, cycle-walking injective and round-tripping on a non-power-of-two domain, refusal below the `10^6` domain floor |
 | `src/rank.test.ts` | 11 | The count table against brute-force enumeration; **the textbook known answers** `16^32`, `64^64`, `10^10`, `1110^4`; rank/unrank a bijection onto `[0, N)` whose enumeration is sorted; **`rank("(415) 555-0123") = 4155550123`** and `unrank(0) = "(000) 000-0000"` |
-| `src/fte.test.ts` | 12 | Round trips through every preset, the stego string re-checked against the platform `RegExp` engine, failing closed on a wrong passphrase or salt, a different salt giving a different string, `n` growing when the payload does not fit, and the frame byte's false-accept rate computed in closed form for all four presets |
+| `src/fte.test.ts` | 13 | Round trips through every preset, the stego string re-checked against the platform `RegExp` engine, failing closed on a wrong passphrase or salt, a different salt giving a different string, `n` growing when the payload does not fit, and the frame byte's false-accept rate computed in closed form for all four presets |
 | `src/regex/dfa.test.ts` | 9 | The DFA cross-checked against the platform `RegExp` engine on a spread of patterns and inputs, minimization (two spellings of one language give one state count), the alphabet partition covering Sigma exactly once, and the parser rejecting out-of-subset constructs by name |
+| `src/classifier.test.ts` | 8 | Anchoring (a buried match is not a match), the textbook PASS/FLAGGED split, the summary admitting it when a sharpened rule flags the stego string or a loose rule passes the raw ciphertext, and base64 checked against the platform encoder across the padding cases |
+| `src/decoys.test.ts` | 11 | Every realistic phone number satisfying NANP assignment rules and every dotted quad being one a log would contain — each checked against the same `tells` function the reveal uses, over 400 draws; the refusal to invent a corpus for hex; scoring; and the admission that a uniform draw sometimes carries no tell at all |
+| `src/pathtrace.test.ts` | 8 | The traced path agreeing with `rank`/`unrank` over an entire language slice, each step starting where the last ended, the exact index where a string leaves the language, and self-loops collapsing to one edge |
+| `src/lengths.test.ts` | 8 | The ladder picking the same `n` the encoder would, checked in closed form (`2(b+1)` for hex); a fixed-length format collapsing to one bucket; a variable-length one separating every size; wire length monotone in message size; and empty or unfittable slices not throwing |
+| `src/substitute.test.ts` | 6 | Every substituted string a genuine language member and never the original; **no substitution ever returning the message that was sent**; the three outcomes partitioning the run; and the measured pass-the-frame-byte rate tracking `frameByteFalseAccept`'s closed form, which counts intervals rather than running the cipher |
+| `src/share.test.ts` | 9 | Round-tripping regex metacharacters through the fragment, dropping unknown and oversized keys, surviving eleven hostile fragments without throwing, and refusing to write a URL containing key material — including a passphrase with a space, which an earlier `decodeURIComponent`-based check let through |
 
 The known-answer tests are the first two rows: `src/ff1.test.ts` for the cipher, `src/rank.test.ts`
 for the combinatorics.
@@ -344,20 +406,36 @@ teaches — the 15-state phone automaton on arrival, the skip link focused, each
 by clicking its own `<summary>`, all four presets, an unparseable pattern behind `aria-invalid`,
 an 81-state automaton over the display cap, an over-capacity message with the encode refused
 before any key derivation, a real encode with its trace, the decode that recovers it, a wrong
-passphrase and a malformed salt, hover states and focus rings — and scans every one. It also adds
+passphrase and a malformed salt, hover states and focus rings — and scans every one. The added
+panels are driven too: the classifier's textbook PASS/FLAGGED table, the same table after the rule
+is sharpened past the format, an invalid rule behind `aria-invalid`, the populated pipeline and
+cycle walk, the highlighted DFA path and its focused scrubber, Spot the fake dealt and then
+revealed, Spot the fake declining on hex, the vector panel before and after its run, the length
+ladder both leaking and not, the substitution panel before and after sixty real trials, the guided
+path open, and the two new scrolling regions focused. It also adds
 three checks axe has no rule for: a contrast audit that resolves `color-mix()` fills, a non-text
 contrast audit against a checked-in baseline, and a horizontal-overflow check for WCAG 1.4.10
 reflow. Uncaught page errors fail the run. Nothing is injected into the page and no disclosure is
 opened from script, so the rendering that is scanned is the rendering a reader actually gets.
 
-**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **22 tests** asking a different
+**Claims suite.** `e2e/claims.spec.ts` (`npm run test:e2e`) runs **48 tests** asking a different
 question from the unit tests: does the page tell the truth about what it computed? The rule that
 makes them worth anything is that each compares two values the *page* printed, or re-derives a
 claim from the page's own inputs by a different route than the source takes. The independent
 oracles are the platform `RegExp` engine (is the stego string really a language member?),
 closed-form combinatorics (a hex format's length-`k` slice has exactly `16^k` members and so
 exactly `4k` bits), BigInt arithmetic over the printed numbers (every `capacity = floor(log2 N)`
-claim), and the round trip itself. The cross-checks a single surface cannot fake: the preset
+claim), and the round trip itself. The newer rows extend the same discipline to the added panels:
+the classifier's verdict column is re-derived by running the platform `RegExp` engine over the
+payloads the page printed; the drawn cycle-walk landings are counted against the FF1 application
+count the status line quotes; every transition the path scrubber names is looked up in the page's
+own transition table; the in-page vector table's "NIST says" and "this page produced" columns are
+compared to each other; every Spot-the-fake candidate is checked to be a genuine language member;
+a real encode is performed so the resulting URL can be grepped for the passphrase and the salt;
+the length ladder is re-derived in closed form (`2(b+1)` for a hex format); and the substitution
+panel is checked to never return the sent message, to put only genuine language members on the
+wire, and to have its measured false-accept rate agree with the closed form it prints.
+The cross-checks a single surface cannot fake: the preset
 menu's hand-written `(33 bits at n = 14)` against the live stat grid, the count table's
 highlighted row against that grid, the capacity bar's figures against both, and the SVG's circle
 count against the transition table. It also covers every failure path by name, and both halves of

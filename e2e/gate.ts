@@ -866,6 +866,123 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
   await expect(page.locator('#decode-status-text')).toContainText('Hex must contain');
   await scanAt('malformed salt — aria-invalid boundary on the salt field');
 
+  // ── The adversary panel ─────────────────────────────────────────────────
+  // Back to the phone preset and a fresh encode, so the classifier has a
+  // payload and the textbook PASS/FLAGGED contrast is on screen. That is the
+  // state most readers will photograph, so it is the one that must scan clean.
+  await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
+  await page.fill('#encode-message', 'hi');
+  await page.fill('#encode-passphrase', 'correct horse battery staple');
+  await page.click('#encode-run');
+  await settleStatus(page, 'encode-status');
+  await expect(page.locator('#encode-status-text')).toContainText('Encoded.');
+  await expect(page.locator('#classifier-body tr')).toHaveCount(3);
+  await expect(page.locator('#classifier-status-text')).toContainText('both raw encodings dropped');
+  await scanAt('classifier run — one PASS row and two FLAGGED rows');
+
+  // The pipeline and the cycle walk are populated by the same encode; the walk
+  // paints a red tone for every rejected landing, which nothing else does.
+  await expect(page.locator('#walk-svg .walk-dot.is-in')).toHaveCount(1);
+  await expect(page.locator('#pipe-stego-value')).not.toHaveText('—');
+  await scanAt('pipeline and cycle walk populated');
+
+  // The honest half of the panel: a rule the format is not contained in, so the
+  // stego string is FLAGGED and the error tone appears in this table.
+  const stego = (await page.locator('#encode-out').textContent()) ?? '';
+  await page.fill('#classifier-pattern', `\\((?!${stego.slice(1, 4)})\\d{3}\\) \\d{3}-\\d{4}`);
+  await page.click('#classifier-run');
+  await expect(page.locator('#classifier-summary')).toContainText('honest limit');
+  await scanAt('classifier sharpened past the format — the stego string flagged');
+
+  await page.click('#classifier-reset');
+  await expect(page.locator('#classifier-status-text')).toContainText('both raw encodings dropped');
+
+  // An invalid rule, for the aria-invalid boundary on that field.
+  await page.fill('#classifier-pattern', '(unclosed');
+  await page.click('#classifier-run');
+  await expect(page.locator('#classifier-pattern')).toHaveAttribute('aria-invalid', 'true');
+  await scanAt('classifier rule invalid — aria-invalid boundary on that field');
+  await page.click('#classifier-reset');
+
+  // ── The path through the automaton ──────────────────────────────────────
+  await expect(page.locator('#pathwalk-string .pathchar')).toHaveCount(14);
+  await expect(page.locator('#dfa-graph .dfa-node.is-current')).toHaveCount(1);
+  await scanAt('path highlighted — the stego string walking the automaton');
+
+  await page.locator('#pathwalk-scrub').focus();
+  await expect(page.locator('#pathwalk-scrub')).toBeFocused();
+  await scanAt('the path scrubber focused — a range input taking its focus ring');
+
+  // ── Spot the fake ───────────────────────────────────────────────────────
+  await page.click('#game-deal');
+  await expect(page.locator('#game-list .game-item')).toHaveCount(8);
+  await scanAt('spot the fake dealt — eight unticked candidates');
+
+  await page.locator('#game-list input[type="checkbox"]').first().check();
+  await page.click('#game-reveal');
+  await expect(page.locator('#game-status-text')).toContainText('correct.');
+  await expect(page.locator('#game-list .game-item.is-generated').first()).toBeVisible();
+  await scanAt('spot the fake revealed — scored, with a tell under every candidate');
+
+  // The preset with no defensible corpus declines to play, in words.
+  await choosePreset(page, 'hex', '[0-9a-f]{32}');
+  await page.click('#game-deal');
+  await expect(page.locator('#game-status-text')).toContainText('no such thing as a realistic');
+  await scanAt('spot the fake declined — hex has no realistic distribution');
+  await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
+
+  // ── The NIST vectors ────────────────────────────────────────────────────
+  await openDisclosure(page, '#vectors-details');
+  await scanAt('vector panel open, not yet run');
+  await page.click('#vectors-run');
+  await settleStatus(page, 'vectors-status');
+  await expect(page.locator('#vectors-body tr')).toHaveCount(9);
+  // Three tones in one table: pass, unsupported, and no failures.
+  await expect(page.locator('#vectors-body tr.is-skipped')).toHaveCount(3);
+  await expect(page.locator('#vectors-body tr.is-flagged')).toHaveCount(0);
+  await scanAt('vectors run — six passing rows and three UNSUPPORTED rows');
+  await closeDisclosure(page, '#vectors-details');
+
+  // ── The two limitations that are now demonstrations ─────────────────────
+  // The ladder renders on compile, so it is already on screen; the variable
+  // pattern is the state where it actually has something to say.
+  await page.fill('#pattern', '[0-9a-f]{1,64}');
+  await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+  await expect(page.locator('#leak-readout')).toContainText('distinct wire lengths');
+  await scanAt('length ladder leaking — every message size its own wire length');
+  await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
+  await expect(page.locator('#leak-readout')).toContainText('leaks nothing');
+  await scanAt('length ladder on a fixed-length format — one bucket');
+
+  // The substitution attack needs a live encode; the format change above
+  // retired the last one.
+  await page.fill('#encode-message', 'hi');
+  await page.fill('#encode-passphrase', 'correct horse battery staple');
+  await page.click('#encode-run');
+  await settleStatus(page, 'encode-status');
+  await expect(page.locator('#encode-status-text')).toContainText('Encoded.');
+  await scanAt('substitution panel armed, not yet run');
+
+  await page.click('#swap-run');
+  await settleStatus(page, 'swap-status');
+  await expect(page.locator('#swap-status-text')).toContainText('None returned your message');
+  // Refused rows and, usually, at least one ACCEPTED row — the inverted tone.
+  await expect(page.locator('#swap-body tr')).not.toHaveCount(0);
+  await scanAt('substitution run — refused and accepted rows in one table');
+
+  // ── The guided path ─────────────────────────────────────────────────────
+  await page.click('#tour-start');
+  await expect(page.locator('#tour-panel')).toBeVisible();
+  await scanAt('guided path open at step one');
+  await page.click('#tour-end');
+  await expect(page.locator('#tour-panel')).toBeHidden();
+
+  // ── The capacity curve ──────────────────────────────────────────────────
+  await page.locator('#curve-wrap').focus();
+  await scanAt('the scrolling capacity-curve region focused — its keyboard route');
+  await page.locator('#walk-wrap').focus();
+  await scanAt('the scrolling cycle-walk region focused — its keyboard route');
+
   // ── The glossary ────────────────────────────────────────────────────────
   await openDisclosure(page, '#glossary-details');
   await scanAt('glossary open — the definition list expanded');

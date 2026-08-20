@@ -70,12 +70,49 @@ export function template(): string {
         <div class="cl-hero-main">
           <h1 class="cl-hero-title">Format-Transforming Encryption</h1>
           <p class="cl-hero-sub">FTE · regex-ranked steganography · FF1 (NIST SP 800-38G)</p>
-          <p class="cl-hero-desc">
-            Compile a regular expression to a minimal DFA, count its length-n language exactly, and
-            encipher real AES-CTR ciphertext into that count — so the output is a uniformly random
-            member of the language, and a regex classifier watching the wire sees a phone number.
-          </p>
         </div>
+      </header>
+
+      <section class="panel quickstart" aria-labelledby="quick-heading">
+        <span class="panel-kicker">TRY IT NOW</span>
+        <h2 id="quick-heading">Hide a message in a phone number</h2>
+        <p class="quick-lede">
+          Type something short, pick a passphrase, press the button. What comes back is real
+          AES-CTR ciphertext wearing a phone number, and the rule below it is the kind a DPI
+          middlebox runs.
+        </p>
+
+        <div class="quick-grid">
+          <div class="field">
+            <label for="quick-message">Message</label>
+            <input id="quick-message" type="text" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="quick-passphrase">Passphrase</label>
+            <input id="quick-passphrase" type="password" autocomplete="new-password" />
+          </div>
+          <div class="field quick-action">
+            <button id="quick-run" type="button" class="primary">Encode</button>
+          </div>
+        </div>
+
+        <output id="quick-out" class="quick-out is-empty" for="quick-run quick-message">Nothing encoded yet.</output>
+
+        <p class="status" id="quick-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="quick-status-text">Ready.</span>
+        </p>
+
+        <p class="quick-more">
+          <a href="#format-heading" id="quick-jump">See how this works &mdash; the regex, the automaton and the arithmetic</a>
+        </p>
+      </section>
+
+      <div class="cl-hero-context">
+        <p class="cl-hero-desc">
+          Compile a regular expression to a minimal DFA, count its length-n language exactly, and
+          encipher real AES-CTR ciphertext into that count — so the output is a uniformly random
+          member of the language, and a regex classifier watching the wire sees a phone number.
+        </p>
         <aside class="cl-hero-why" aria-label="Why it matters">
           <span class="cl-hero-why-label">WHY IT MATTERS</span>
           <p class="cl-hero-why-text">
@@ -84,7 +121,7 @@ export function template(): string {
             provably, without weakening the cipher underneath.
           </p>
         </aside>
-      </header>
+      </div>
 
       <div class="chip-row" role="list" aria-label="Primitives used">
         <span class="chip primary" role="listitem">Format-Transforming Encryption</span>
@@ -94,6 +131,27 @@ export function template(): string {
         <span class="chip" role="listitem">PBKDF2-SHA256</span>
         <span class="chip" role="listitem">DFA minimization</span>
       </div>
+
+      <div class="labbar">
+        <div class="labbar-actions">
+          <button id="tour-start" type="button">Start the guided path</button>
+          <button id="share-copy" type="button">Copy link to this state</button>
+        </div>
+        <p class="status labbar-status" id="labbar-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="labbar-status-text">Seven steps, or wander freely &mdash; the link never carries your passphrase.</span>
+        </p>
+      </div>
+
+      <section class="panel tour" id="tour-panel" aria-labelledby="tour-heading" hidden>
+        <span class="panel-kicker">GUIDED PATH</span>
+        <h2 id="tour-heading">Step <span id="tour-index">1</span> of <span id="tour-total">7</span>: <span id="tour-title">&mdash;</span></h2>
+        <p id="tour-body">&mdash;</p>
+        <div class="button-row">
+          <button id="tour-prev" type="button">Previous</button>
+          <button id="tour-next" type="button" class="primary">Next step</button>
+          <button id="tour-end" type="button">End the path</button>
+        </div>
+      </section>
 
       <section class="panel" aria-labelledby="intro-heading">
         <span class="panel-kicker">START HERE</span>
@@ -115,8 +173,11 @@ export function template(): string {
         </p>
         <p class="callout">
           Nothing here is simulated. Every encode below runs WebCrypto PBKDF2 and AES-CTR, a
-          hand-rolled FF1 that passes all nine NIST SP 800-38G sample vectors, and a real
-          rank/unrank walk over the DFA your pattern compiles to.
+          hand-rolled FF1 that passes all nine NIST SP 800-38G sample vectors in the test suite,
+          and a real rank/unrank walk over the DFA your pattern compiles to. You can
+          <a href="#refs-heading">run those vectors yourself</a>, in this tab: six of the nine
+          will reproduce here, and the three that will not are the AES-192 ones, because WebCrypto
+          does not implement AES-192 in any browser.
         </p>
         <p class="hint">
           Sibling demo: <a href="${FORMAT_WARD_URL}" target="_blank" rel="noopener">Format Ward</a>
@@ -214,6 +275,22 @@ export function template(): string {
           <span class="status-icon" aria-hidden="true">·</span><span id="dfa-status-text">—</span>
         </p>
 
+        <div class="pathwalk" id="pathwalk">
+          <h3>The path your string walks</h3>
+          <p class="hint" id="pathwalk-hint">
+            Encode below and this lights up the exact route the stego string takes through the
+            automaton above &mdash; one state per character, ending on an accepting ring. The
+            transition table is the same information as text.
+          </p>
+          <div class="field">
+            <label for="pathwalk-scrub">Character position</label>
+            <input id="pathwalk-scrub" type="range" min="0" max="0" step="1" value="0" disabled
+              aria-describedby="pathwalk-readout" />
+          </div>
+          <p class="pathwalk-readout" id="pathwalk-readout" role="status" aria-live="polite">Nothing encoded yet.</p>
+          <div class="pathwalk-string" id="pathwalk-string" role="group" aria-label="Stego string, character by character"></div>
+        </div>
+
         <details class="trace" id="dfa-table-details">
           <summary>Transition table — the same automaton as text</summary>
           <div>
@@ -280,6 +357,46 @@ export function template(): string {
           </p>
         </div>
 
+        <h3>The pipeline, with your values on it</h3>
+        <ol class="pipeline" id="pipeline">
+          <li class="pipe" id="pipe-message">
+            <span class="pipe-name">Message</span>
+            <span class="pipe-value" id="pipe-message-value">&mdash;</span>
+          </li>
+          <li class="pipe" id="pipe-cipher">
+            <span class="pipe-name">AES-CTR ciphertext</span>
+            <span class="pipe-value" id="pipe-cipher-value">&mdash;</span>
+          </li>
+          <li class="pipe" id="pipe-integer">
+            <span class="pipe-name">Framed 0x01 &Vert; ct, big-endian &rarr; I</span>
+            <span class="pipe-value" id="pipe-integer-value">&mdash;</span>
+          </li>
+          <li class="pipe" id="pipe-domain">
+            <span class="pipe-name">Language slice N = |L &cap; &Sigma;<sup>n</sup>|</span>
+            <span class="pipe-value" id="pipe-domain-value">&mdash;</span>
+          </li>
+          <li class="pipe" id="pipe-ff1">
+            <span class="pipe-name">FF1, cycle-walked into [0, N)</span>
+            <span class="pipe-value" id="pipe-ff1-value">&mdash;</span>
+          </li>
+          <li class="pipe" id="pipe-stego">
+            <span class="pipe-name">Unranked through the DFA</span>
+            <span class="pipe-value" id="pipe-stego-value">&mdash;</span>
+          </li>
+        </ol>
+
+        <h3>The cycle walk</h3>
+        <p class="hint" id="walk-hint">
+          FF1 permutes [0, 2<sup>k</sup>), which is wider than [0, N). Anything landing outside is
+          re-enciphered until it lands inside &mdash; that is the whole trick, and it terminates
+          because a permutation cannot revisit a value without cycling.
+        </p>
+        <span id="walk-title" class="sr-only">Number line of the cycle walk. The wide bar is the 2^k domain FF1 permutes; the inner bar is [0, N). Each marked landing is one FF1 application, the last of them inside the inner bar. The reading below states the same figures as text.</span>
+        <div class="walk-wrap" id="walk-wrap" role="region" tabindex="0" aria-label="Cycle walk diagram, scrollable">
+          <svg id="walk-svg" class="walk-svg" role="img" aria-labelledby="walk-title"></svg>
+        </div>
+        <p class="walk-readout" id="walk-readout" role="status" aria-live="polite">Nothing encoded yet.</p>
+
         <h3>Send these alongside the string</h3>
         <p class="hint">
           The salt cannot live inside the stego string — every character of that string is spoken for
@@ -298,8 +415,57 @@ export function template(): string {
         </details>
       </section>
 
+      <section class="panel classifier" aria-labelledby="classifier-heading">
+        <span class="panel-kicker">4 · THE ADVERSARY</span>
+        <h2 id="classifier-heading">Run the classifier</h2>
+        <p>
+          This is the machine FTE was built for. A regex-based DPI middlebox anchors a rule at both
+          ends of whatever crosses the wire and drops what does not match. Below, the same message
+          is offered to it three ways &mdash; as the stego string, and as the raw AES-CTR ciphertext
+          in the two encodings anyone would reach for first. The bytes underneath are identical.
+          Only the shape differs.
+        </p>
+
+        <div class="field">
+          <label for="classifier-pattern">Classifier rule (anchored; ^ and $ are implied)</label>
+          <input id="classifier-pattern" type="text" spellcheck="false" autocapitalize="off"
+            autocomplete="off" aria-describedby="classifier-pattern-note" />
+          <p class="field-note" id="classifier-pattern-note">
+            Starts as a copy of your format regex, which is the case FTE promises to win. Sharpen it
+            past the format &mdash; <code>\(9\d{2}\) \d{3}-\d{4}</code>, say &mdash; and watch
+            the promise expire: FTE beats the regex it was compiled against, not every regex.
+          </p>
+        </div>
+
+        <div class="button-row">
+          <button id="classifier-run" type="button" class="primary">Run the classifier</button>
+          <button id="classifier-reset" type="button">Reset to the format regex</button>
+        </div>
+
+        <p class="status" id="classifier-status" role="status" aria-live="polite">
+          <span class="status-icon" aria-hidden="true">·</span><span id="classifier-status-text">Encode a message first &mdash; the classifier needs something to look at.</span>
+        </p>
+
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Classifier verdicts, scrollable">
+          <table>
+            <caption id="classifier-caption">One rule, three encodings of one ciphertext.</caption>
+            <thead>
+              <tr>
+                <th scope="col">On the wire</th>
+                <th scope="col">Payload</th>
+                <th scope="col">Verdict</th>
+                <th scope="col">Why</th>
+              </tr>
+            </thead>
+            <tbody id="classifier-body"></tbody>
+          </table>
+        </div>
+
+        <p class="callout" id="classifier-summary">Nothing classified yet.</p>
+      </section>
+
       <section class="panel" aria-labelledby="decode-heading">
-        <span class="panel-kicker">4 · DECODE</span>
+        <span class="panel-kicker">5 · DECODE</span>
         <h2 id="decode-heading">Decode it back</h2>
         <p>
           The same pattern ranks the string to an integer, FF1 runs backwards through the same cycle
@@ -340,7 +506,7 @@ export function template(): string {
       </section>
 
       <section class="panel" aria-labelledby="counts-heading">
-        <span class="panel-kicker">5 · COUNTS</span>
+        <span class="panel-kicker">6 · COUNTS</span>
         <h2 id="counts-heading">The count table</h2>
         <p>
           C[q0][k] is the number of strings of length exactly k that the automaton accepts from its
@@ -348,6 +514,12 @@ export function template(): string {
           a string of that length can carry, and the row for the chosen n is the one the encoder
           uses.
         </p>
+        <span id="curve-title" class="sr-only">Line chart of capacity in bits against string length n, for the current pattern. A marker shows the chosen n, and a horizontal line shows the bits the current message needs; where the line crosses the curve is the shortest n that fits. The table below carries the same numbers.</span>
+        <div class="curve-wrap" id="curve-wrap" role="region" tabindex="0" aria-label="Capacity curve, scrollable">
+          <svg id="curve-svg" class="curve-svg" role="img" aria-labelledby="curve-title"></svg>
+        </div>
+        <p class="curve-readout" id="curve-readout" role="status" aria-live="polite">&nbsp;</p>
+
         <div class="table-wrap" role="region" tabindex="0" aria-label="Count table, scrollable">
           <table>
             <caption id="counts-caption">C[q0][k] for k = 0 to 20.</caption>
@@ -365,7 +537,7 @@ export function template(): string {
       </section>
 
       <section class="panel limits" aria-labelledby="limits-heading">
-        <span class="panel-kicker">6 · HONEST LIMITATIONS</span>
+        <span class="panel-kicker">7 · HONEST LIMITATIONS</span>
         <h2 id="limits-heading">What this does not do</h2>
         <p>
           These are not caveats bolted on at the end. Each one is a property of the construction on
@@ -384,6 +556,29 @@ export function template(): string {
             numbers all separate it from the genuine article immediately. Dyer et al. say so in the
             paper that introduced FTE: it targets regex-based DPI, not traffic analysis.
           </p>
+
+          <div class="game" id="game">
+            <h4 id="game-heading">Spot the fake</h4>
+            <p class="hint" id="game-hint">
+              Half of these came out of the encoder above, by the same unranking that produced your
+              stego string. Half are shaped the way the real world shapes them. Tick the ones you
+              think the encoder made.
+            </p>
+
+            <fieldset class="game-set" id="game-set">
+              <legend id="game-legend">Which of these did the encoder produce?</legend>
+              <div id="game-list" class="game-list"></div>
+            </fieldset>
+
+            <div class="button-row">
+              <button id="game-deal" type="button" class="primary">Deal a round</button>
+              <button id="game-reveal" type="button" disabled>Reveal</button>
+            </div>
+
+            <p class="status" id="game-status" role="status" aria-live="polite">
+              <span class="status-icon" aria-hidden="true">·</span><span id="game-status-text">Deal a round to play.</span>
+            </p>
+          </div>
         </div>
 
         <div class="limit">
@@ -398,6 +593,34 @@ export function template(): string {
             against a real corpus, so that the length distribution matches the cover traffic instead
             of the payload.
           </p>
+
+          <div class="leak" id="leak">
+            <h4 id="leak-heading">What the wire sees</h4>
+            <p class="hint" id="leak-hint">
+              The ladder an observer would build for the format above. They do not need the key,
+              the salt or the pattern &mdash; only a character count. Rows that share a wire length
+              are indistinguishable to them; rows that do not, are not. The four presets are all
+              fixed-length, so they leak nothing here &mdash; put
+              <code>[0-9a-f]{1,64}</code> in the pattern box above and the ladder separates every
+              single message size, which is the leak this limitation is about.
+            </p>
+            <div class="table-wrap" role="region" tabindex="0" aria-label="Length ladder, scrollable">
+              <table>
+                <caption id="leak-caption">Message size against the length that appears on the wire.</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Message bytes</th>
+                    <th scope="col">Payload bits</th>
+                    <th scope="col">n the encoder picks</th>
+                    <th scope="col">Wire length</th>
+                    <th scope="col">Indistinguishable from</th>
+                  </tr>
+                </thead>
+                <tbody id="leak-body"></tbody>
+              </table>
+            </div>
+            <p class="leak-readout" id="leak-readout" role="status" aria-live="polite">&nbsp;</p>
+          </div>
         </div>
 
         <div class="limit">
@@ -419,11 +642,65 @@ export function template(): string {
             stego string under a separate derived key, transmits or embeds the tag, and refuses to
             decode anything that does not verify — encrypt-then-MAC, checked before ranking.
           </p>
+
+          <div class="swap" id="swap">
+            <h4 id="swap-heading">Substitute the string</h4>
+            <p class="hint" id="swap-hint">
+              This performs the attack the paragraph above describes. Your stego string is replaced
+              with other <em>real members of the same language</em> &mdash; different phone numbers,
+              drawn by the same unranking &mdash; and each one is handed to the receiver's own
+              decode, under your passphrase and your salt. Nothing is simulated: every trial is a
+              real inverse cycle walk through FF1.
+            </p>
+
+            <div class="button-row">
+              <button id="swap-run" type="button" class="primary">Run 60 substitutions</button>
+            </div>
+
+            <p class="status" id="swap-status" role="status" aria-live="polite">
+              <span class="status-icon" aria-hidden="true">·</span><span id="swap-status-text">Encode a message first &mdash; the attack needs a string to replace.</span>
+            </p>
+
+            <dl class="stat-grid" id="swap-stats">
+              <div class="stat">
+                <dt>Refused: no frame byte</dt>
+                <dd id="swap-frame">—</dd>
+              </div>
+              <div class="stat">
+                <dt>Refused: not valid UTF-8</dt>
+                <dd id="swap-utf8">—</dd>
+              </div>
+              <div class="stat">
+                <dt>Accepted as a message</dt>
+                <dd id="swap-accepted">—</dd>
+              </div>
+              <div class="stat">
+                <dt>Measured vs predicted past the frame byte</dt>
+                <dd id="swap-rate">—</dd>
+              </div>
+            </dl>
+
+            <div class="table-wrap" role="region" tabindex="0" aria-label="Substitution trials, scrollable">
+              <table>
+                <caption id="swap-caption">A sample of the substitutions and what the receiver did with each.</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Put on the wire instead</th>
+                    <th scope="col">What the receiver did</th>
+                    <th scope="col">What it handed the reader</th>
+                  </tr>
+                </thead>
+                <tbody id="swap-body"></tbody>
+              </table>
+            </div>
+
+            <p class="callout" id="swap-verdict">Nothing substituted yet.</p>
+          </div>
         </div>
       </section>
 
       <section class="panel refs" aria-labelledby="refs-heading">
-        <span class="panel-kicker">7 · SOURCES</span>
+        <span class="panel-kicker">8 · SOURCES</span>
         <h2 id="refs-heading">References</h2>
         <ol>
           <li>
@@ -451,6 +728,47 @@ export function template(): string {
             <a href="https://csrc.nist.gov/pubs/sp/800/38/g/final" target="_blank" rel="noopener">csrc.nist.gov</a>
           </li>
         </ol>
+
+        <details class="trace" id="vectors-details">
+          <summary>Known-answer tests &mdash; run the nine NIST vectors in this browser</summary>
+          <div>
+            <p class="hint">
+              The page claims FF1 per SP 800-38G. This runs the sample vectors NIST published with
+              it &mdash; radix 10 and 36, with and without a tweak &mdash; against the same
+              implementation every encode above uses, in your browser, now. Each is checked both
+              ways: the ciphertext must equal NIST's, and decryption must return the plaintext.
+            </p>
+            <p class="hint">
+              Six of the nine will run here. The other three use AES-192, which WebCrypto does not
+              implement in any browser, so the key import is refused before FF1 is reached. Those
+              three are marked UNSUPPORTED rather than failed, and they are covered by the Node test
+              suite, which runs all nine. That split is worth noticing on its own: a green CI run on
+              Node says nothing about what a visitor's browser can actually reproduce.
+            </p>
+            <div class="button-row">
+              <button id="vectors-run" type="button" class="primary">Run all nine</button>
+            </div>
+            <p class="status" id="vectors-status" role="status" aria-live="polite">
+              <span class="status-icon" aria-hidden="true">·</span><span id="vectors-status-text">Not run yet.</span>
+            </p>
+            <div class="table-wrap" role="region" tabindex="0" aria-label="NIST FF1 sample vector results, scrollable">
+              <table>
+                <caption id="vectors-caption">The nine SP 800-38G sample vectors, as run here.</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Vector</th>
+                    <th scope="col">Key</th>
+                    <th scope="col">Radix</th>
+                    <th scope="col">NIST says</th>
+                    <th scope="col">This page produced</th>
+                    <th scope="col">Result</th>
+                  </tr>
+                </thead>
+                <tbody id="vectors-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </details>
 
         <details class="glossary" id="glossary-details">
           <summary>Glossary — terms used on this page</summary>

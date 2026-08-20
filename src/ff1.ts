@@ -310,6 +310,16 @@ export interface CycleWalkResult {
   value: bigint;
   /** How many FF1 applications the walk took. 1 means it landed first try. */
   steps: number;
+  /**
+   * Every value the walk produced, in order, the last of which is `value`.
+   * Kept so the page can draw the walk rather than assert a step count: a
+   * reader who is told "4 applications" learns a number, and a reader who
+   * watches three landings miss [0, N) and the fourth land inside learns why
+   * cycle-walking is the thing that makes FF1 usable on a language slice.
+   *
+   * Bounded by MAX_WALK, so this cannot grow without limit.
+   */
+  landings: bigint[];
 }
 
 export async function cycleWalkEncrypt(
@@ -321,9 +331,11 @@ export async function cycleWalkEncrypt(
   assertDomain(domain, value);
   const k = walkWidth(domain);
   let current = value;
+  const landings: bigint[] = [];
   for (let steps = 1; steps <= MAX_WALK; steps += 1) {
     current = fromBits(await ff1Encrypt(key, 2, toBits(current, k), tweak));
-    if (current < domain) return { value: current, steps };
+    landings.push(current);
+    if (current < domain) return { value: current, steps, landings };
   }
   throw new Error(`Cycle walk did not terminate in ${MAX_WALK} steps.`);
 }
@@ -337,9 +349,11 @@ export async function cycleWalkDecrypt(
   assertDomain(domain, value);
   const k = walkWidth(domain);
   let current = value;
+  const landings: bigint[] = [];
   for (let steps = 1; steps <= MAX_WALK; steps += 1) {
     current = fromBits(await ff1Decrypt(key, 2, toBits(current, k), tweak));
-    if (current < domain) return { value: current, steps };
+    landings.push(current);
+    if (current < domain) return { value: current, steps, landings };
   }
   throw new Error(`Cycle walk did not terminate in ${MAX_WALK} steps.`);
 }

@@ -11,18 +11,38 @@ import {
   compileFormat,
   decode,
   encode,
-  payloadBitsFor
+  frameByteFalseAccept,
+  payloadBitsFor,
+  prepareDecode
 } from "../fte.ts";
 import {
   MAX_N,
   MAX_TABLE_BYTES,
+  buildCountTable,
   capacityBitsOf,
   estimateTableBytes,
-  smallestLengthFor
+  scanCapacity,
+  smallestLengthFor,
+  unrank
 } from "../rank.ts";
 import { hexToBytes } from "../ff1.ts";
 import { PBKDF2_ITERATIONS } from "../keys.ts";
-import { clearDfa, renderDfa, transitionRows } from "../dfaview.ts";
+import { clearDfa, clearHighlight, highlightPath, renderDfa, transitionRows } from "../dfaview.ts";
+import { Path, pathEdges, tracePath } from "../pathtrace.ts";
+import {
+  ClassifierError,
+  classify,
+  compileClassifier,
+  payloadsFor,
+  readClassifier
+} from "../classifier.ts";
+import { Round, buildRound, realismFor, scoreRound } from "../decoys.ts";
+import { Ladder, buildLadder, bytesConsistentWith, ladderReadout } from "../lengths.ts";
+import { runSubstitutions } from "../substitute.ts";
+import { FF1_VECTORS, VectorRun, runVector, tally } from "../vectors.ts";
+import { assertNoSecrets, decodeState, encodeState } from "../share.ts";
+import { CurveInput, WalkInput, renderCurve, renderWalk, walkReadout } from "./charts.ts";
+import { TOUR } from "./tour.ts";
 import { PRESETS, template } from "./template.ts";
 
 const COUNT_ROWS = 20;
@@ -34,9 +54,37 @@ interface State {
   lastEncode: EncodeResult | null;
   /** `pattern|n` the last encode was produced under. See `retireStaleResults`. */
   lastEncodeSignature: string | null;
+  /** The route the last stego string walks, for the scrubber and the drawing. */
+  lastPath: Path | null;
+  /** The Spot-the-fake round in play, or null before the first deal. */
+  round: Round | null;
+  /** Whether the reveal has happened, so a second click cannot re-score. */
+  revealed: boolean;
+  /** 0-based guided-path step, or null when the path is not running. */
+  tourStep: number | null;
+  /** True once the reader edits the classifier away from the format regex. */
+  classifierPinned: boolean;
 }
 
-const state: State = { format: null, n: PRESETS[0].n, lastEncode: null, lastEncodeSignature: null };
+const state: State = {
+  format: null,
+  n: PRESETS[0].n,
+  lastEncode: null,
+  lastEncodeSignature: null,
+  lastPath: null,
+  round: null,
+  revealed: false,
+  tourStep: null,
+  classifierPinned: false
+};
+
+const GAME_GENERATED = 4;
+const GAME_REALISTIC = 4;
+/** Rows of the length ladder. Enough to show a pattern, few enough to read. */
+const LADDER_BYTES = 12;
+/** Substitutions per run. ~1s in the browser: PBKDF2 runs once, not per trial. */
+const SWAP_TRIALS = 60;
+const SWAP_SHOWN = 8;
 
 function $<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -371,6 +419,17 @@ function retireStaleResults(): void {
   ($("decode-fill") as HTMLButtonElement).disabled = true;
   setOutput("decode-out", "Nothing decoded yet.", true);
   setStatus("decode-status", "idle", "Idle.");
+  // The pipeline, the walk, the highlighted path and the classifier verdicts
+  // all describe a string that no longer belongs to this format. Retire them
+  // together or the page keeps showing a confident account of nothing.
+  clearPipeline();
+  clearPathwalk();
+  setOutput("quick-out", "Nothing encoded yet.", true);
+  setStatus("quick-status", "idle", "Ready.");
+  clearClassifier("The format changed — encode again to give the classifier something to look at.");
+  setStatus("classifier-status", "idle", "Waiting for a fresh encode.");
+  clearSwap("The format changed — encode again to give the attack a string to replace.");
+  setStatus("swap-status", "idle", "Waiting for a fresh encode.");
   setStatus(
     "encode-status",
     "idle",
@@ -384,9 +443,16 @@ function afterCompile(): void {
   renderGraph();
   renderCounts();
   renderCapacityBar();
+  renderCurvePanel();
+  renderLadder();
+  syncClassifierPattern();
+  clearGame();
+  setStatus("game-status", "idle", "Deal a round to play.");
   const usable = state.format !== null;
   ($("encode-run") as HTMLButtonElement).disabled = !usable;
   ($("decode-run") as HTMLButtonElement).disabled = !usable;
+  ($("quick-run") as HTMLButtonElement).disabled = !usable;
+  ($("game-deal") as HTMLButtonElement).disabled = !usable;
 }
 
 // ── Encode / decode ─────────────────────────────────────────────────────────
@@ -461,6 +527,8 @@ async function runEncode(): Promise<void> {
       false
     );
     renderTrace(result);
+    renderPipeline(result);
+    renderPathwalk(result);
     ($("encode-copy") as HTMLButtonElement).disabled = false;
     ($("decode-fill") as HTMLButtonElement).disabled = false;
 
@@ -482,6 +550,11 @@ async function runEncode(): Promise<void> {
       );
     }
     renderCapacityBar();
+    renderCurvePanel();
+    // The adversary runs on every fresh encode rather than waiting to be asked.
+    // The contrast between the stego string and the raw ciphertext is the point
+    // of the page, and a reader should not have to find a second button to see it.
+    runClassifier();
   } catch (error) {
     setStatus("encode-status", "error", (error as Error).message);
   } finally {
@@ -539,6 +612,777 @@ async function runDecode(): Promise<void> {
   }
 }
 
+// ── Pipeline, cycle walk and the path through the automaton ─────────────────
+
+const PIPE_EMPTY: Array<[string, string]> = [
+  ["pipe-message-value", "—"],
+  ["pipe-cipher-value", "—"],
+  ["pipe-integer-value", "—"],
+  ["pipe-domain-value", "—"],
+  ["pipe-ff1-value", "—"],
+  ["pipe-stego-value", "—"]
+];
+
+function clearPipeline(): void {
+  for (const [id, text] of PIPE_EMPTY) $(id).textContent = text;
+  for (const pipe of document.querySelectorAll(".pipe")) pipe.classList.remove("is-live");
+  renderWalk($("walk-svg") as unknown as SVGSVGElement, null);
+  $("walk-readout").textContent = "Nothing encoded yet.";
+}
+
+function renderPipeline(result: EncodeResult): void {
+  const t = result.trace;
+  const values: Array<[string, string]> = [
+    ["pipe-message-value", `${t.messageBytes} UTF-8 byte${t.messageBytes === 1 ? "" : "s"}`],
+    ["pipe-cipher-value", abbreviate(t.ciphertextHex)],
+    ["pipe-integer-value", `${abbreviate(t.integer.toString())} · ${t.integerBits} bits`],
+    ["pipe-domain-value", `${formatBig(result.total)} · ${result.capacityBits} bits`],
+    [
+      "pipe-ff1-value",
+      `${abbreviate(t.ciphered.toString())} after ${t.walkSteps} application${t.walkSteps === 1 ? "" : "s"}`
+    ],
+    ["pipe-stego-value", abbreviate(result.stego, 12)]
+  ];
+  for (const [id, text] of values) $(id).textContent = text;
+  for (const pipe of document.querySelectorAll(".pipe")) pipe.classList.add("is-live");
+
+  const walk: WalkInput = {
+    domain: result.total,
+    walkBits: t.walkBits,
+    landings: t.walkLandings
+  };
+  renderWalk($("walk-svg") as unknown as SVGSVGElement, walk);
+  // formatBig, so a 116-digit N reads the way the stat grid prints it.
+  $("walk-readout").textContent = walkReadout(walk, formatBig(result.total));
+}
+
+/**
+ * The scrubber over the stego string, and the highlight it drives on the graph.
+ *
+ * Position 0 is the start state, before any character is consumed; position i
+ * is the state reached by consuming character i. That off-by-one is the whole
+ * reason the readout names both the character and the state it led to — a
+ * reader stepping through should never have to work out which end of the edge
+ * they are looking at.
+ */
+function renderPathAt(position: number): void {
+  const path = state.lastPath;
+  const svg = $("dfa-graph") as unknown as SVGSVGElement;
+  const readout = $("pathwalk-readout");
+  const strip = $("pathwalk-string");
+  if (!path || path.states.length === 0) {
+    clearHighlight(svg);
+    return;
+  }
+
+  const clamped = Math.max(0, Math.min(position, path.steps.length));
+  highlightPath(svg, {
+    states: path.states,
+    edges: pathEdges(path),
+    activeIndex: clamped - 1
+  });
+
+  for (const child of strip.children) {
+    const index = Number((child as HTMLElement).dataset.index);
+    child.classList.toggle("is-current", index === clamped - 1);
+    child.classList.toggle("is-past", index < clamped - 1);
+  }
+
+  // Bring the current state into view inside the graph's own scroller. Without
+  // this the scrubber is close to useless on a long chain: the phone automaton
+  // is 15 states wide and most of them sit outside the visible box, so the
+  // reader drags the slider and watches nothing move.
+  scrollCurrentIntoView(svg, path.states[clamped]);
+
+  const stateNow = path.states[clamped];
+  if (clamped === 0) {
+    readout.textContent = `Position 0: at the start state q${stateNow}, nothing consumed yet.`;
+  } else {
+    const step = path.steps[clamped - 1];
+    const accepting = path.states.length - 1 === clamped && path.accepted;
+    readout.textContent =
+      `Character ${clamped} of ${path.steps.length} is "${step.char}": q${step.from} → q${step.to}.` +
+      (accepting ? " That is an accepting state — the string is a full match." : "");
+  }
+}
+
+/**
+ * Horizontal-only, and only within the graph wrapper — never
+ * `scrollIntoView`, which would also scroll the PAGE and yank the reader away
+ * from the slider they are dragging.
+ */
+function scrollCurrentIntoView(svg: SVGSVGElement, stateId: number): void {
+  const wrap = document.getElementById("dfa-graph-wrap");
+  const node = svg.querySelector(`[data-state="${stateId}"]`);
+  if (!wrap || !node) return;
+
+  const wrapBox = wrap.getBoundingClientRect();
+  const nodeBox = node.getBoundingClientRect();
+  const margin = 48;
+  let delta = 0;
+  if (nodeBox.left < wrapBox.left + margin) delta = nodeBox.left - wrapBox.left - margin;
+  else if (nodeBox.right > wrapBox.right - margin) delta = nodeBox.right - wrapBox.right + margin;
+  if (delta === 0) return;
+
+  const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  wrap.scrollBy({ left: delta, behavior: reduced ? "auto" : "smooth" });
+}
+
+function clearPathwalk(): void {
+  state.lastPath = null;
+  const scrub = $("pathwalk-scrub") as HTMLInputElement;
+  scrub.disabled = true;
+  scrub.min = "0";
+  scrub.max = "0";
+  scrub.value = "0";
+  $("pathwalk-readout").textContent = "Nothing encoded yet.";
+  $("pathwalk-string").textContent = "";
+  clearHighlight($("dfa-graph") as unknown as SVGSVGElement);
+}
+
+function renderPathwalk(result: EncodeResult): void {
+  const format = state.format;
+  if (!format) return;
+  const path = tracePath(format.dfa, result.stego);
+  state.lastPath = path;
+
+  const strip = $("pathwalk-string");
+  strip.textContent = "";
+  Array.from(result.stego).forEach((char, index) => {
+    const span = document.createElement("span");
+    span.className = "pathchar";
+    span.dataset.index = String(index);
+    // A space would collapse to nothing in a flex strip, so it gets a visible
+    // placeholder glyph. The word goes in as REAL hidden text, not an
+    // `aria-label`: a label on a role-less <span> is `aria-prohibited-attr`,
+    // silently discarded by some assistive tech and flagged by the gate.
+    span.textContent = char === " " ? "␣" : char;
+    if (char === " ") {
+      const spoken = document.createElement("span");
+      spoken.className = "sr-only";
+      spoken.textContent = " space";
+      span.appendChild(spoken);
+    }
+    strip.appendChild(span);
+  });
+
+  const scrub = $("pathwalk-scrub") as HTMLInputElement;
+  scrub.disabled = false;
+  scrub.min = "0";
+  scrub.max = String(path.steps.length);
+  scrub.value = String(path.steps.length);
+  renderPathAt(path.steps.length);
+}
+
+// ── The classifier ──────────────────────────────────────────────────────────
+
+function clearClassifier(message: string): void {
+  const body = $("classifier-body");
+  body.textContent = "";
+  placeholderRow(body, 4, message);
+  $("classifier-summary").textContent = "Nothing classified yet.";
+}
+
+function runClassifier(): void {
+  const last = state.lastEncode;
+  if (!last) {
+    setStatus(
+      "classifier-status",
+      "error",
+      "Encode a message first — the classifier needs something to look at."
+    );
+    clearClassifier("No payload yet — encode a message above.");
+    return;
+  }
+
+  const input = $("classifier-pattern") as HTMLInputElement;
+  let rule: RegExp;
+  try {
+    rule = compileClassifier(input.value.trim());
+    input.removeAttribute("aria-invalid");
+  } catch (error) {
+    input.setAttribute("aria-invalid", "true");
+    setStatus("classifier-status", "error", (error as ClassifierError).message);
+    clearClassifier("The classifier rule does not compile.");
+    return;
+  }
+
+  const rows = classify(rule, payloadsFor(last.stego, last.trace.ciphertextHex));
+  const reading = readClassifier(rows);
+
+  const body = $("classifier-body");
+  body.textContent = "";
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    tr.className = row.verdict === "pass" ? "is-pass" : "is-flagged";
+
+    const label = document.createElement("th");
+    label.scope = "row";
+    label.textContent = row.label;
+    tr.appendChild(label);
+
+    const value = document.createElement("td");
+    const code = document.createElement("code");
+    code.className = "wire";
+    code.textContent = abbreviate(row.value, 14);
+    value.appendChild(code);
+    tr.appendChild(value);
+
+    const verdict = document.createElement("td");
+    // Word first, colour second: the verdict must survive greyscale.
+    verdict.textContent = row.verdict === "pass" ? "PASS — forwarded" : "FLAGGED — dropped";
+    tr.appendChild(verdict);
+
+    const why = document.createElement("td");
+    why.textContent = row.reason;
+    tr.appendChild(why);
+
+    body.appendChild(tr);
+  }
+
+  $("classifier-summary").textContent = reading.summary;
+  setStatus(
+    "classifier-status",
+    reading.textbook ? "ok" : "working",
+    reading.textbook
+      ? "Stego string through, both raw encodings dropped."
+      : "Ran — and the result is not the textbook one. Read the summary below the table."
+  );
+}
+
+/** Keep the rule mirroring the format until the reader takes it over. */
+function syncClassifierPattern(): void {
+  if (state.classifierPinned) return;
+  const format = state.format;
+  ($("classifier-pattern") as HTMLInputElement).value = format ? format.pattern : "";
+}
+
+// ── Spot the fake ───────────────────────────────────────────────────────────
+
+/** A uniform BigInt in [0, bound), drawn from the platform CSPRNG. */
+function randomBelow(bound: bigint): bigint {
+  if (bound <= 1n) return 0n;
+  const bits = bound.toString(2).length;
+  const bytes = Math.ceil(bits / 8);
+  const buf = new Uint8Array(bytes);
+  // Rejection sampling: masking to `bits` then rejecting keeps the draw
+  // uniform, which a modulo would not. The game is about a uniform
+  // distribution, so a biased one here would be quietly self-defeating.
+  for (let guard = 0; guard < 1000; guard += 1) {
+    crypto.getRandomValues(buf);
+    let value = 0n;
+    for (const byte of buf) value = (value << 8n) | BigInt(byte);
+    value &= (1n << BigInt(bits)) - 1n;
+    if (value < bound) return value;
+  }
+  return bound - 1n;
+}
+
+function currentPresetId(): string {
+  const format = state.format;
+  if (!format) return "custom";
+  const preset = PRESETS.find((p) => p.pattern === format.pattern);
+  return preset ? preset.id : "custom";
+}
+
+function clearGame(): void {
+  state.round = null;
+  state.revealed = false;
+  $("game-list").textContent = "";
+  ($("game-reveal") as HTMLButtonElement).disabled = true;
+}
+
+function dealRound(): void {
+  const format = state.format;
+  const list = $("game-list");
+  clearGame();
+
+  if (!format) {
+    setStatus("game-status", "error", "No automaton — fix the pattern above.");
+    return;
+  }
+
+  const presetId = currentPresetId();
+  const realism = realismFor(presetId);
+  if (!("make" in realism)) {
+    setStatus("game-status", "idle", realism.why);
+    ($("game-deal") as HTMLButtonElement).disabled = false;
+    return;
+  }
+
+  const total = format.counts[state.n] ?? 0n;
+  if (total < BigInt(GAME_GENERATED)) {
+    setStatus("game-status", "error", "This slice holds too few strings to draw a round from.");
+    return;
+  }
+
+  let table;
+  try {
+    table = buildCountTable(format.dfa, state.n);
+  } catch (error) {
+    setStatus("game-status", "error", (error as Error).message);
+    return;
+  }
+
+  // Real unrankings at uniformly random indices — the same function the encoder
+  // uses, so these are exactly the strings FTE produces. Nothing is faked.
+  const generated: string[] = [];
+  const seen = new Set<string>();
+  for (let guard = 0; generated.length < GAME_GENERATED && guard < 200; guard += 1) {
+    const value = unrank(format.dfa, table, randomBelow(table.total));
+    if (seen.has(value)) continue;
+    seen.add(value);
+    generated.push(value);
+  }
+
+  const round = buildRound(presetId, generated, GAME_REALISTIC);
+  state.round = round;
+
+  round.candidates.forEach((candidate, index) => {
+    const wrap = document.createElement("div");
+    wrap.className = "game-item";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = `game-pick-${index}`;
+    input.value = candidate.value;
+
+    const label = document.createElement("label");
+    label.htmlFor = input.id;
+    label.textContent = candidate.value;
+
+    const tell = document.createElement("span");
+    tell.className = "game-tell";
+    tell.id = `game-tell-${index}`;
+
+    wrap.append(input, label, tell);
+    list.appendChild(wrap);
+  });
+
+  state.revealed = false;
+  ($("game-reveal") as HTMLButtonElement).disabled = false;
+  setStatus(
+    "game-status",
+    "idle",
+    `${round.candidates.length} candidates, ${round.generatedCount} of them from the encoder. Tick the ones you think it made, then Reveal.`
+  );
+}
+
+function revealRound(): void {
+  const round = state.round;
+  if (!round || state.revealed) return;
+  state.revealed = true;
+
+  const picked = new Set<string>();
+  round.candidates.forEach((candidate, index) => {
+    const input = document.getElementById(`game-pick-${index}`) as HTMLInputElement | null;
+    if (input?.checked) picked.add(candidate.value);
+  });
+
+  const score = scoreRound(round, picked);
+  round.candidates.forEach((candidate, index) => {
+    const tell = document.getElementById(`game-tell-${index}`);
+    if (tell) tell.textContent = candidate.tell;
+    const item = tell?.parentElement;
+    item?.classList.add(candidate.generated ? "is-generated" : "is-real");
+  });
+
+  const missed = score.missed.length;
+  setStatus(
+    "game-status",
+    "ok",
+    `${score.correct} of ${score.total} correct. ` +
+      (missed === 0
+        ? "You caught every generated string — which is the point: a regex could not, and you could."
+        : `${missed} generated string${missed === 1 ? "" : "s"} passed as real. That is the gap between "a regex cannot tell" and "nobody can tell".`)
+  );
+  ($("game-reveal") as HTMLButtonElement).disabled = true;
+}
+
+// ── NIST known-answer tests ─────────────────────────────────────────────────
+
+async function runVectors(): Promise<void> {
+  const button = $("vectors-run") as HTMLButtonElement;
+  const body = $("vectors-body");
+  button.disabled = true;
+  body.textContent = "";
+  setStatus("vectors-status", "working", `Running ${FF1_VECTORS.length} vectors…`);
+
+  const runs: VectorRun[] = [];
+  try {
+    for (const vector of FF1_VECTORS) {
+      const run = await runVector(vector);
+      runs.push(run);
+      const tr = document.createElement("tr");
+      // Three classes, not two: an unsupported vector is neither a pass nor a
+      // failure of this code, and painting it red would be a false alarm.
+      tr.className =
+        run.status === "pass" ? "is-pass" : run.status === "fail" ? "is-flagged" : "is-skipped";
+
+      const name = document.createElement("th");
+      name.scope = "row";
+      name.textContent = vector.name;
+      tr.appendChild(name);
+
+      for (const text of [
+        `AES-${vector.keyBits}${vector.tweakHex ? " + tweak" : ""}`,
+        String(vector.radix),
+        vector.expected,
+        run.status === "unsupported" ? "not run here" : run.actual,
+        run.status === "pass" ? "PASS" : run.status === "fail" ? "FAIL" : "UNSUPPORTED"
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  } catch (error) {
+    setStatus("vectors-status", "error", `The run threw: ${(error as Error).message}`);
+    if (body.children.length === 0) placeholderRow(body, 6, "The run stopped before any vector completed.");
+    button.disabled = false;
+    return;
+  }
+
+  const counts = tally(runs);
+  const skipped =
+    counts.unsupported === 0
+      ? ""
+      : ` ${counts.unsupported} could not run: WebCrypto has no AES-192, so no browser can reproduce those three — they are covered by the Node test suite, which runs all ${counts.total}.`;
+
+  setStatus(
+    "vectors-status",
+    counts.failed === 0 ? "ok" : "error",
+    counts.failed === 0
+      ? `${counts.passed} of ${counts.total} NIST sample vectors reproduced exactly, in this browser, by the same FF1 every encode above uses.${skipped}`
+      : `${counts.failed} of ${counts.total} FAILED — this implementation does NOT match SP 800-38G. Do not trust anything else on this page.`
+  );
+  button.disabled = false;
+}
+
+// ── Capacity curve ──────────────────────────────────────────────────────────
+
+function renderCurvePanel(): void {
+  const svg = $("curve-svg") as unknown as SVGSVGElement;
+  const readout = $("curve-readout");
+  const format = state.format;
+  if (!format) {
+    renderCurve(svg, null);
+    readout.textContent = "No automaton — fix the pattern above.";
+    return;
+  }
+
+  // Cap the plotted range so a 512-length ceiling does not squash the shape of
+  // the part anyone is reading.
+  const limit = Math.min(MAX_N, Math.max(state.n + 6, format.maxCapacityN + 2, 24));
+  const scanned = scanCapacity(format.dfa, limit);
+  const capacityByN = scanned.map((total) => capacityBitsOf(total));
+
+  const message = ($("encode-message") as HTMLTextAreaElement).value;
+  const requiredBits = payloadBitsFor(utf8Length(message));
+  const fit = smallestLengthFor(format.counts, requiredBits);
+  const fitN = fit !== null && fit.n <= limit ? fit.n : null;
+
+  const input: CurveInput = { capacityByN, chosenN: state.n, requiredBits, fitN };
+  renderCurve(svg, input);
+
+  const atChosen = capacityByN[state.n] ?? 0;
+  readout.textContent =
+    `Capacity against n, up to ${limit}. At the chosen n = ${state.n} the slice holds ${atChosen} bits; ` +
+    `this message needs ${requiredBits}. ` +
+    (fitN === null
+      ? "No length up to the ceiling holds it — the curve never reaches the line."
+      : fitN <= state.n
+        ? `It already fits, and would fit from n = ${fitN} upward.`
+        : `The curve first crosses the line at n = ${fitN}, which is where the encoder would grow to.`);
+}
+
+// ── Guided path ─────────────────────────────────────────────────────────────
+
+function renderTour(): void {
+  const panel = $("tour-panel");
+  const step = state.tourStep;
+  if (step === null) {
+    panel.hidden = true;
+    ($("tour-start") as HTMLButtonElement).textContent = "Start the guided path";
+    return;
+  }
+
+  const entry = TOUR[step];
+  panel.hidden = false;
+  $("tour-index").textContent = String(step + 1);
+  $("tour-total").textContent = String(TOUR.length);
+  $("tour-title").textContent = entry.title;
+  $("tour-body").textContent = entry.body;
+  ($("tour-prev") as HTMLButtonElement).disabled = step === 0;
+  ($("tour-next") as HTMLButtonElement).textContent =
+    step === TOUR.length - 1 ? "Finish" : "Next step";
+  ($("tour-start") as HTMLButtonElement).textContent = "Restart the guided path";
+
+  const target = document.getElementById(entry.target);
+  if (target) {
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    target.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  }
+  writeShareState();
+}
+
+function moveTour(delta: number): void {
+  if (state.tourStep === null) return;
+  const next = state.tourStep + delta;
+  if (next < 0) return;
+  if (next >= TOUR.length) {
+    state.tourStep = null;
+    renderTour();
+    setStatus("labbar-status", "ok", "That is the path. The limitations are the part worth rereading.");
+    return;
+  }
+  state.tourStep = next;
+  renderTour();
+}
+
+// ── Shareable state ─────────────────────────────────────────────────────────
+
+/**
+ * Write the current teaching state into the fragment.
+ *
+ * `replaceState`, not a hash assignment: the reader is not navigating, and
+ * pushing an entry per keystroke would make the back button useless. The
+ * passphrase fields are handed to `assertNoSecrets` on every write, so the
+ * guarantee is enforced here rather than promised in a comment.
+ */
+function writeShareState(): void {
+  const format = state.format;
+  if (!format) return;
+  const fragment = encodeState({
+    preset: ($("preset") as HTMLSelectElement).value,
+    pattern: format.pattern,
+    n: state.n,
+    message: ($("encode-message") as HTMLTextAreaElement).value,
+    classifier: state.classifierPinned
+      ? ($("classifier-pattern") as HTMLInputElement).value
+      : undefined,
+    step: state.tourStep === null ? undefined : state.tourStep + 1
+  });
+
+  try {
+    assertNoSecrets(fragment, [
+      ($("encode-passphrase") as HTMLInputElement).value,
+      ($("decode-passphrase") as HTMLInputElement).value,
+      ($("quick-passphrase") as HTMLInputElement).value,
+      state.lastEncode?.saltHex ?? ""
+    ]);
+  } catch {
+    // Refuse to write rather than publish a passphrase. Silent because the
+    // reader did nothing wrong — their message simply contains their key.
+    return;
+  }
+
+  history.replaceState(null, "", `#${fragment}`);
+}
+
+function copyShareLink(): void {
+  writeShareState();
+  const url = window.location.href;
+  void navigator.clipboard?.writeText(url).then(
+    () =>
+      setStatus(
+        "labbar-status",
+        "ok",
+        "Link copied. It carries the pattern, n, the message and the classifier rule — never a passphrase or a salt."
+      ),
+    () => setStatus("labbar-status", "error", "The browser refused clipboard access.")
+  );
+}
+
+// ── Length leakage ──────────────────────────────────────────────────────────
+
+function renderLadder(): void {
+  const body = $("leak-body");
+  const readout = $("leak-readout");
+  body.textContent = "";
+  const format = state.format;
+  if (!format) {
+    placeholderRow(body, 5, "No automaton yet — fix the pattern above.");
+    readout.textContent = " ";
+    return;
+  }
+
+  const ladder: Ladder = buildLadder(format.counts, LADDER_BYTES);
+  for (const rung of ladder.rungs) {
+    const tr = document.createElement("tr");
+    if (rung.n === state.n) tr.className = "is-chosen";
+
+    const head = document.createElement("th");
+    head.scope = "row";
+    head.textContent = String(rung.messageBytes);
+    tr.appendChild(head);
+
+    const others =
+      rung.n === null
+        ? "—"
+        : (() => {
+            const sharing = bytesConsistentWith(ladder, rung.n).filter(
+              (b) => b !== rung.messageBytes
+            );
+            return sharing.length === 0
+              ? "nothing — this size stands alone on the wire"
+              : `${sharing.join(", ")} byte${sharing.length === 1 ? "" : "s"}`;
+          })();
+
+    for (const text of [
+      String(rung.payloadBits),
+      rung.n === null ? "does not fit" : String(rung.n),
+      rung.n === null ? "—" : `${rung.n} characters`,
+      others
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  readout.textContent = ladderReadout(ladder);
+}
+
+// ── Substitution ────────────────────────────────────────────────────────────
+
+function clearSwap(message: string): void {
+  const body = $("swap-body");
+  body.textContent = "";
+  placeholderRow(body, 3, message);
+  for (const id of ["swap-frame", "swap-utf8", "swap-accepted", "swap-rate"]) {
+    $(id).textContent = "—";
+  }
+  $("swap-verdict").textContent = "Nothing substituted yet.";
+}
+
+async function runSwap(): Promise<void> {
+  const format = state.format;
+  const last = state.lastEncode;
+  const button = $("swap-run") as HTMLButtonElement;
+  if (!format || !last) {
+    setStatus("swap-status", "error", "Encode a message first — the attack needs a string to replace.");
+    return;
+  }
+  const passphrase = ($("encode-passphrase") as HTMLInputElement).value;
+  if (passphrase.length === 0) {
+    setStatus("swap-status", "error", "The receiver's passphrase is needed to run their decode.");
+    return;
+  }
+
+  button.disabled = true;
+  setStatus("swap-status", "working", `Substituting ${SWAP_TRIALS} times…`);
+  try {
+    const table = buildCountTable(format.dfa, last.n);
+    // Derived ONCE for the whole run. Per-trial PBKDF2 would take ten minutes.
+    const prepared = await prepareDecode(passphrase, last.salt);
+    const report = await runSubstitutions(
+      format,
+      table,
+      prepared,
+      last.stego,
+      SWAP_TRIALS,
+      randomBelow
+    );
+
+    $("swap-frame").textContent = `${report.rejectedFrame} of ${report.trials.length}`;
+    $("swap-utf8").textContent = `${report.rejectedUtf8} of ${report.trials.length}`;
+    $("swap-accepted").textContent = `${report.accepted} of ${report.trials.length}`;
+
+    // The cross-check: the share getting PAST the frame byte, measured by
+    // actually running the cipher, against the closed form that only counts
+    // intervals of [0, N). Two routes, printed side by side.
+    const pastFrame = report.accepted + report.rejectedUtf8;
+    const measured = report.trials.length === 0 ? 0 : pastFrame / report.trials.length;
+    const predicted = frameByteFalseAccept(last.total);
+    $("swap-rate").textContent = `${(measured * 100).toFixed(0)}% vs ${(predicted * 100).toFixed(1)}%`;
+
+    const body = $("swap-body");
+    body.textContent = "";
+    // ACCEPTED trials first. They are the whole point of the panel and, at ~1
+    // in 30, a first-eight sample usually contains none of them — which would
+    // leave the most important row type invisible behind eight refusals. The
+    // figures above still carry the true rates, and the caption says the
+    // ordering is deliberate, so nothing here overstates how often it happens.
+    const ordered = [
+      ...report.trials.filter((t) => t.outcome === "accepted"),
+      ...report.trials.filter((t) => t.outcome !== "accepted")
+    ];
+    for (const trial of ordered.slice(0, SWAP_SHOWN)) {
+      const tr = document.createElement("tr");
+      tr.className = trial.outcome === "accepted" ? "is-flagged" : "is-pass";
+
+      const head = document.createElement("th");
+      head.scope = "row";
+      head.textContent = trial.stego;
+      tr.appendChild(head);
+
+      const what =
+        trial.outcome === "accepted"
+          ? "ACCEPTED — handed it over as a message"
+          : trial.outcome === "rejected-frame"
+            ? "Refused — no frame byte"
+            : "Refused — not valid UTF-8";
+      const got =
+        trial.outcome === "accepted"
+          ? JSON.stringify(trial.message ?? "")
+          : "nothing";
+
+      for (const text of [what, got]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+    if (report.trials.length > SWAP_SHOWN) {
+      placeholderRow(
+        body,
+        3,
+        `…and ${report.trials.length - SWAP_SHOWN} more, counted in the figures above.`
+      );
+    }
+    $("swap-caption").textContent =
+      report.accepted === 0
+        ? `A sample of the substitutions and what the receiver did with each. None was accepted this run.`
+        : `A sample of the substitutions. The ${report.accepted} the receiver ACCEPTED are listed first, because they are the ones that matter — the figures above give the true rates.`;
+
+    // Note the inversion of the usual reading: an ACCEPTED row is the bad news
+    // here. The receiver taking a substituted string is the failure.
+    //
+    // The one thing that must NEVER happen is a substitution returning the real
+    // message. Confidentiality does not depend on the frame byte, so this is
+    // checked rather than assumed — if it ever fired, something far worse than
+    // a missing MAC would be wrong.
+    const sent = ($("encode-message") as HTMLTextAreaElement).value;
+    const leaked = report.trials.some((t) => t.message !== null && t.message === sent);
+    if (leaked) {
+      setStatus(
+        "swap-status",
+        "error",
+        "A substituted string returned the original message. That must never happen — stop trusting this page."
+      );
+      return;
+    }
+
+    $("swap-verdict").textContent =
+      report.accepted === 0
+        ? `Every one of the ${report.trials.length} substitutions was refused — this time. ${(predicted * 100).toFixed(0)}% of them still got past the frame byte and were caught only by the UTF-8 check, which is a coincidence of encoding, not a signature check. Run it again: the rate is what matters, not the run.`
+        : `${report.accepted} of ${report.trials.length} substituted strings were ACCEPTED and handed to the reader as a message. None of them is what you sent, and the receiver has no way to know that. A MAC would have caught all ${report.trials.length}.`;
+
+    setStatus(
+      "swap-status",
+      "ok",
+      `${report.trials.length} substitutions. None returned your message; ${report.accepted} returned something else the receiver could not tell apart from one.`
+    );
+  } catch (error) {
+    setStatus("swap-status", "error", (error as Error).message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 function debounce(fn: () => void, ms: number): () => void {
@@ -547,6 +1391,51 @@ function debounce(fn: () => void, ms: number): () => void {
     if (handle !== undefined) clearTimeout(handle);
     handle = setTimeout(fn, ms);
   };
+}
+
+/**
+ * The hero encoder.
+ *
+ * It owns no cryptography of its own. It copies its two fields into the main
+ * encode panel and calls the same `runEncode`, then mirrors the result — so the
+ * two encoders physically cannot disagree, and the reader who scrolls down
+ * finds the full trace of the very string the hero just showed them.
+ */
+async function runQuickEncode(): Promise<void> {
+  const message = ($("quick-message") as HTMLInputElement).value;
+  const passphrase = ($("quick-passphrase") as HTMLInputElement).value;
+  if (passphrase.length === 0) {
+    setStatus("quick-status", "error", "A passphrase is required.");
+    return;
+  }
+
+  ($("encode-message") as HTMLTextAreaElement).value = message;
+  ($("encode-passphrase") as HTMLInputElement).value = passphrase;
+  renderCapacityBar();
+
+  const button = $("quick-run") as HTMLButtonElement;
+  button.disabled = true;
+  setStatus("quick-status", "working", "Deriving keys and enciphering…");
+  try {
+    await runEncode();
+    const result = state.lastEncode;
+    if (!result) {
+      // runEncode already wrote the reason into the encode panel; echo it here
+      // rather than inventing a second, possibly different explanation.
+      setStatus("quick-status", "error", $("encode-status-text").textContent ?? "Encoding failed.");
+      setOutput("quick-out", "Nothing encoded yet.", true);
+      return;
+    }
+    setOutput("quick-out", result.stego, false);
+    const verdict = $("classifier-status-text").textContent ?? "";
+    setStatus(
+      "quick-status",
+      "ok",
+      `That is ${result.trace.messageBytes} byte${result.trace.messageBytes === 1 ? "" : "s"} of AES-CTR ciphertext wearing a phone number. ${verdict}`
+    );
+  } finally {
+    button.disabled = state.format === null;
+  }
 }
 
 export function initUI(root: HTMLElement): void {
@@ -621,9 +1510,93 @@ export function initUI(root: HTMLElement): void {
     );
   });
 
+  // ── Hero encoder ──────────────────────────────────────────────────────────
+  $("quick-run").addEventListener("click", () => void runQuickEncode());
+
+  // ── Path scrubber ─────────────────────────────────────────────────────────
+  ($("pathwalk-scrub") as HTMLInputElement).addEventListener("input", (event) => {
+    renderPathAt(Number((event.target as HTMLInputElement).value));
+  });
+
+  // ── Classifier ────────────────────────────────────────────────────────────
+  const classifierInput = $("classifier-pattern") as HTMLInputElement;
+  classifierInput.addEventListener("input", () => {
+    // Once touched, the rule is the reader's; stop mirroring the format into it.
+    state.classifierPinned = true;
+  });
+  $("classifier-run").addEventListener("click", runClassifier);
+  $("classifier-reset").addEventListener("click", () => {
+    state.classifierPinned = false;
+    syncClassifierPattern();
+    classifierInput.removeAttribute("aria-invalid");
+    runClassifier();
+  });
+
+  // ── Spot the fake ─────────────────────────────────────────────────────────
+  $("swap-run").addEventListener("click", () => void runSwap());
+  $("game-deal").addEventListener("click", dealRound);
+  $("game-reveal").addEventListener("click", revealRound);
+
+  // ── NIST vectors ──────────────────────────────────────────────────────────
+  $("vectors-run").addEventListener("click", () => void runVectors());
+
+  // ── Guided path ───────────────────────────────────────────────────────────
+  $("tour-start").addEventListener("click", () => {
+    state.tourStep = 0;
+    renderTour();
+  });
+  $("tour-prev").addEventListener("click", () => moveTour(-1));
+  $("tour-next").addEventListener("click", () => moveTour(1));
+  $("tour-end").addEventListener("click", () => {
+    state.tourStep = null;
+    renderTour();
+    setStatus("labbar-status", "idle", "Path ended. Everything stays where it is.");
+  });
+
+  // ── Share ─────────────────────────────────────────────────────────────────
+  $("share-copy").addEventListener("click", copyShareLink);
+
   // Arrival state: the first preset, compiled, with the capacity bar showing a
-  // real message already in the box.
-  presetSelect.value = PRESETS[0].id;
-  ($("encode-message") as HTMLTextAreaElement).value = "hi";
-  applyPreset(PRESETS[0].id);
+  // real message already in the box — unless a shared link says otherwise.
+  const shared = decodeState(window.location.hash);
+  const sharedPreset = PRESETS.find((p) => p.id === shared.preset);
+  presetSelect.value = sharedPreset ? sharedPreset.id : PRESETS[0].id;
+  ($("encode-message") as HTMLTextAreaElement).value = shared.message ?? "hi";
+  ($("quick-message") as HTMLInputElement).value = shared.message ?? "hi";
+  applyPreset(presetSelect.value);
+
+  // A shared pattern may be a custom one, and a shared n may differ from the
+  // preset's. Apply them after the preset so they win, and recompile once.
+  if (shared.pattern !== undefined && shared.pattern !== patternInput.value) {
+    patternInput.value = shared.pattern;
+    if (!PRESETS.some((p) => p.pattern === shared.pattern)) {
+      presetSelect.value = "custom";
+      $("preset-note").textContent = "Custom pattern — capacity is computed live.";
+    }
+    recompile(true);
+  }
+  if (shared.n !== undefined && shared.n <= MAX_N && state.format !== null) {
+    if ((state.format.counts[shared.n] ?? 0n) > 0n) {
+      state.n = shared.n;
+      lengthInput.value = String(shared.n);
+      renderFormat();
+      renderCounts();
+      renderCapacityBar();
+      renderCurvePanel();
+    }
+  }
+  if (shared.classifier !== undefined) {
+    state.classifierPinned = true;
+    ($("classifier-pattern") as HTMLInputElement).value = shared.classifier;
+  }
+  if (shared.step !== undefined && shared.step >= 1 && shared.step <= TOUR.length) {
+    state.tourStep = shared.step - 1;
+    renderTour();
+  }
+
+  clearClassifier("No payload yet — encode a message above.");
+  clearSwap("No stego string yet — encode a message above.");
+  // An empty tbody under a header row is `th-has-data-cells`, so the not-yet-run
+  // state is a real row saying so — the same rule the count table follows.
+  placeholderRow($("vectors-body"), 6, "Not run yet — press the button above.");
 }

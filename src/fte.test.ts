@@ -6,6 +6,7 @@ import {
   compileFormat,
   decode,
   encode,
+  frameByteFalseAccept,
   payloadBitsFor
 } from "./fte.ts";
 import { DfaTooLargeError } from "./regex/dfa.ts";
@@ -174,29 +175,6 @@ describe("encode / decode round trip", () => {
   );
 });
 
-/**
- * The frame byte is not a MAC, and this measures how far from one it is.
- *
- * A wrong passphrase makes the inverse cycle walk land uniformly in [0, N). The
- * decoder accepts if the MINIMAL big-endian encoding of that value starts with
- * 0x01 — and the leading byte of a minimal encoding is not uniform over 0..255,
- * so the intuitive "1 in 256" is simply wrong. Computed in closed form here by
- * summing the sub-ranges of [0, N) whose leading byte is 0x01, which is a
- * different route from the decoder's (it strips bytes; this counts intervals).
- */
-function frameByteFalseAccept(total: bigint): number {
-  let accepted = 0n;
-  for (let bytes = 1; bytes <= 64; bytes += 1) {
-    const lo = 1n << BigInt(8 * (bytes - 1));
-    const hi = 2n << BigInt(8 * (bytes - 1));
-    const start = lo < total ? lo : total;
-    const end = hi < total ? hi : total;
-    if (end > start) accepted += end - start;
-    if (1n << BigInt(8 * bytes) >= total) break;
-  }
-  return Number((accepted * 1_000_000n) / total) / 1_000_000;
-}
-
 describe("the frame byte is not authentication", () => {
   it("false-accepts a wrong key at a rate set by the domain, not by 1/256", () => {
     const phone = compileFormat("\\(\\d{3}\\) \\d{3}-\\d{4}");
@@ -276,5 +254,29 @@ describe("length selection", () => {
     expect(chooseLength(format, 32, 128)).toBe(32);
     expect(chooseLength(format, 4, 128)).toBe(32);
     expect(() => chooseLength(format, 4, 10_000)).toThrow(/tops out at/);
+  });
+});
+
+describe("the cycle walk is recorded, not just counted", () => {
+  it("the landings end at the enciphered value and match the step count", async () => {
+    const format = compileFormat("\\(\\d{3}\\) \\d{3}-\\d{4}");
+    const result = await encode({
+      format,
+      n: 14,
+      message: "hi",
+      passphrase: "pw",
+      salt: new Uint8Array(16).fill(7)
+    });
+    const { walkLandings, walkSteps, ciphered, domain } = result.trace;
+    expect(walkLandings).toHaveLength(walkSteps);
+    expect(walkLandings[walkLandings.length - 1]).toBe(ciphered);
+    // Every landing before the last missed the domain; the last one is inside.
+    for (const landing of walkLandings.slice(0, -1)) {
+      expect(landing >= domain).toBe(true);
+    }
+    expect(ciphered < domain).toBe(true);
+    // And every landing is inside the binary domain FF1 actually permutes.
+    const ceiling = 1n << BigInt(result.trace.walkBits);
+    for (const landing of walkLandings) expect(landing < ceiling).toBe(true);
   });
 });

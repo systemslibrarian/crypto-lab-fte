@@ -199,13 +199,54 @@ body {
   line-height: 1.5;
   color: var(--text);
 }
+/*
+ * The hero carries the title and nothing else.
+ *
+ * It used to carry the description and the "why it matters" aside too, which
+ * on a 390x844 phone put the first thing a reader could PRESS 1,016px down —
+ * past the fold, behind two paragraphs. The demo's best moment is a phone
+ * number appearing where a ciphertext should be, and that moment should be
+ * free. So the prose moved below the encoder into `.cl-hero-context`, which
+ * reproduces the old two-column row in its new position.
+ */
+.cl-hero-context {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: clamp(1rem, 4vw, 3rem);
+  flex-wrap: wrap;
+  margin: 0 0 1.5rem;
+}
+.cl-hero-context .cl-hero-desc {
+  flex: 1 1 22rem;
+  min-width: min(100%, 20rem);
+  margin: 0;
+}
+
 @media (max-width: 640px) {
-  .cl-hero {
+  .cl-hero,
+  .cl-hero-context {
     flex-direction: column;
   }
+  /*
+   * `flex-basis` resolves against the MAIN axis, so the 22rem that makes these
+   * two share a row on desktop becomes a 352px *height* the moment the
+   * container turns into a column — 240px of dead space above the fold for
+   * ~110px of title. Reset the basis with the direction, or the reflow the
+   * media query exists to perform is undone by the basis it leaves behind.
+   */
   .cl-hero-why {
     flex-basis: auto;
     width: 100%;
+  }
+  /* `min-width: 0` alongside the basis reset is the fleet's spelling of this
+     fix — see the same block in crypto-lab-rsa-forge and format-ward. This lab
+     had only ever reset `.cl-hero-why`, which is why it kept the dead space
+     the rest of the fleet had already lost. */
+  .cl-hero-main,
+  .cl-hero-context .cl-hero-desc {
+    flex-basis: auto;
+    min-width: 0;
   }
 }
 
@@ -684,3 +725,461 @@ details.glossary > div {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Additions: hero encoder, guided path, pipeline, cycle walk, classifier,
+   spot-the-fake, capacity curve, path highlighting.
+
+   Every colour below is an existing token. The ratios that governed the
+   choices, measured against --surface / --surface-2 / --surface-3:
+     --text 12.3-13.9   --muted 6.7-7.5   --accent 5.1-5.8   --accent-2 8.1-9.2
+     --ok 9.1-10.4      --warn 9.2-10.5   --danger 6.4-7.3   --border-strong 3.6-4.1
+   So --border-strong is used for MEANINGFUL NON-TEXT ONLY (3:1) and never for
+   text (4.5:1), and --border stays decorative, as it was already.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Hero encoder ── */
+.quickstart {
+  border-color: var(--border-strong);
+}
+.quick-lede {
+  color: var(--text);
+}
+.quick-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr auto;
+  gap: 0.9rem;
+  align-items: end;
+}
+.quick-grid .field {
+  margin: 0;
+}
+.quick-action button {
+  width: 100%;
+  min-height: var(--tap-min);
+}
+.quick-out {
+  display: block;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: clamp(1.15rem, 4vw, 1.9rem);
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+  overflow-wrap: anywhere;
+}
+.quick-out.is-empty {
+  color: var(--muted);
+  font-size: 1rem;
+  letter-spacing: normal;
+}
+.quick-more {
+  margin: 0.7rem 0 0;
+  font-size: 0.9rem;
+}
+
+/*
+ * Mobile: full-width fields stacked, which is the right shape for a phone. This
+ * used to squeeze the passphrase and the button onto a shared row to win back
+ * vertical space; fixing the hero's flex-basis bug returned 243px, so the
+ * cramped version was no longer buying anything.
+ */
+@media (max-width: 720px) {
+  .quick-grid {
+    grid-template-columns: 1fr;
+    gap: 0.7rem;
+  }
+  .quickstart {
+    padding-top: 0.9rem;
+    padding-bottom: 0.9rem;
+  }
+  .quickstart h2 {
+    font-size: 1.15rem;
+  }
+  .quick-lede {
+    font-size: 0.92rem;
+    line-height: 1.45;
+    margin-bottom: 0.8rem;
+  }
+  .quick-out {
+    margin-top: 0.7rem;
+    padding: 0.8rem;
+  }
+}
+
+/* ── Lab toolbar and guided path ── */
+.labbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1.2rem;
+  align-items: center;
+  justify-content: space-between;
+  margin: 1.2rem 0;
+}
+.labbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.labbar-status {
+  margin: 0;
+  flex: 1 1 18rem;
+}
+.panel.tour {
+  border-color: var(--accent);
+}
+
+/* ── Path through the automaton ── */
+.pathwalk {
+  margin-top: 1rem;
+}
+.pathwalk-readout {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  color: var(--text);
+}
+.pathwalk-string {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.7rem;
+}
+.pathchar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6rem;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background-color: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.pathchar.is-past {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.pathchar.is-current {
+  color: var(--accent-ink);
+  background-color: var(--accent-soft);
+  border-color: var(--accent-soft);
+  font-weight: 700;
+}
+
+/* Highlighting on the drawing itself. Width and dash change too, so the path
+   is legible without colour (WCAG 1.4.1). */
+.dfa-node.is-on-path {
+  stroke: var(--accent-2);
+  stroke-width: 3;
+}
+.dfa-node.is-current {
+  stroke: var(--warn);
+  stroke-width: 4;
+}
+.dfa-edge.is-on-path {
+  stroke: var(--accent-2);
+  stroke-width: 3;
+}
+
+/* ── Pipeline ── */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.6rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: pipe;
+}
+.pipe {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  padding: 0.7rem 0.8rem;
+}
+.pipe.is-live {
+  border-color: var(--border-strong);
+}
+.pipe-name {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pipe-value {
+  display: block;
+  margin-top: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.pipe.is-live .pipe-value {
+  color: var(--accent-2);
+}
+
+/* ── Cycle walk ── */
+.walk-wrap {
+  margin-top: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  overflow: auto;
+}
+.walk-svg {
+  display: block;
+  min-width: 100%;
+}
+.walk-outer {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.4;
+}
+.walk-inner {
+  fill: var(--surface-3);
+  stroke: var(--accent-2);
+  stroke-width: 2;
+}
+.walk-tick {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+.walk-tick.is-out {
+  stroke: var(--danger);
+  stroke-dasharray: 3 2;
+}
+.walk-tick.is-in {
+  stroke: var(--ok);
+}
+.walk-dot.is-out {
+  fill: var(--danger);
+  stroke: var(--danger);
+}
+.walk-dot.is-in {
+  fill: var(--ok);
+  stroke: var(--ok);
+}
+.walk-dot-label,
+.walk-label {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.walk-readout {
+  margin: 0.5rem 0 0;
+  font-size: 0.86rem;
+  color: var(--text);
+}
+
+/* ── Classifier ── */
+code.wire {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+tr.is-pass th[scope="row"] {
+  color: var(--ok);
+}
+tr.is-flagged th[scope="row"] {
+  color: var(--danger);
+}
+
+/* ── Spot the fake ── */
+.game {
+  margin-top: 1.2rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  padding: 0.9rem;
+}
+.game h4 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-head);
+  font-size: 1.05rem;
+  color: var(--text);
+}
+.game-set {
+  margin: 0.8rem 0 0;
+  padding: 0;
+  border: 0;
+}
+.game-set > legend {
+  padding: 0;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+.game-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+.game-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: var(--tap-min);
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: var(--surface-3);
+}
+.game-item > label {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.game-item input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--accent);
+}
+.game-tell {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.game-item.is-generated {
+  border-color: var(--warn);
+}
+.game-item.is-real {
+  border-color: var(--accent-2);
+}
+
+/* ── Capacity curve ── */
+.curve-wrap {
+  margin-bottom: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  overflow: auto;
+}
+.curve-svg {
+  display: block;
+  min-width: 100%;
+}
+.curve-axis {
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+.curve-line {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 2.4;
+}
+.curve-need {
+  stroke: var(--warn);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+.curve-chosen {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 3;
+}
+.curve-dot {
+  fill: var(--accent-soft);
+  stroke: var(--accent-soft);
+}
+.curve-fit {
+  fill: var(--warn);
+  stroke: var(--warn);
+}
+.curve-tick {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.curve-readout {
+  margin: 0 0 0.8rem;
+  font-size: 0.86rem;
+  color: var(--text);
+}
+
+/* ── Range input: a 44px target and a visible focus ring ── */
+#app input[type="range"] {
+  width: 100%;
+  min-height: var(--tap-min);
+  accent-color: var(--accent);
+  background: transparent;
+}
+#app input[type="range"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+#app input[type="range"]:disabled {
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pathchar,
+  .pipe {
+    transition: none;
+  }
+}
+
+/* An unsupported vector is not a failure: it gets its own neutral row rather
+   than the red one, and the word UNSUPPORTED in the last column carries it. */
+tr.is-skipped th[scope="row"] {
+  color: var(--muted);
+}
+
+/* Belt and braces for the long-number readouts: N can be 116 digits (64^64 for
+   the base64 preset) and a bare digit run has no break opportunity in it, so
+   without this it pushes the document sideways at 380px rather than wrapping.
+   The values are abbreviated in script as well; this is the guard for anything
+   long that arrives here later. */
+.walk-readout,
+.curve-readout,
+.pathwalk-readout,
+#classifier-summary {
+  overflow-wrap: anywhere;
+}
+
+/* A range input carries a small default inline margin that put the field 4px
+   past its panel at 380px. */
+#app input[type="range"] {
+  margin-inline: 0;
+  box-sizing: border-box;
+}
+
+/* ── Length leakage and substitution: the two limitations made pressable ── */
+.leak,
+.swap {
+  margin-top: 1.2rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-2);
+  padding: 0.9rem;
+}
+.leak h4,
+.swap h4 {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-head);
+  font-size: 1.05rem;
+  color: var(--text);
+}
+.leak-readout {
+  margin: 0.6rem 0 0;
+  font-size: 0.86rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.swap .stat-grid {
+  margin: 0.8rem 0;
+}
+#swap-verdict {
+  overflow-wrap: anywhere;
+}
+/* An ACCEPTED substitution is the BAD outcome here, so the tones are inverted
+   relative to the classifier table on purpose — and the words in the cell say
+   which is which, so the colour is never carrying the meaning alone. */

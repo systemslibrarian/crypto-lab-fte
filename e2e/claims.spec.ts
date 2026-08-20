@@ -538,3 +538,557 @@ test.describe('stale results are retired, and only when they are stale', () => {
     await expect(page.locator('#decode-fill')).toBeEnabled();
   });
 });
+
+/**
+ * The adversary panel is the one place the page makes a claim about a THIRD
+ * party — what a middlebox would do. So the oracle is the platform regex
+ * engine, run over the payloads the page printed, never the page's own verdict
+ * column read back to itself.
+ */
+test.describe('the classifier tells the truth about the adversary', () => {
+  test('the verdicts match what the platform regex engine says about the printed payloads', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#classifier-status-text')).not.toContainText('Encode a message first');
+
+    const rule = await page.inputValue('#classifier-pattern');
+    expect(rule).toBe(PHONE);
+
+    const rows = await page.locator('#classifier-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        label: (tr.children[0].textContent ?? '').trim(),
+        payload: (tr.children[1].textContent ?? '').trim(),
+        verdict: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    expect(rows).toHaveLength(3);
+
+    const anchored = new RegExp(`^(?:${rule})$`);
+    for (const row of rows) {
+      // The payload cell abbreviates long values; only judge the ones printed
+      // in full, which is exactly the stego string — the row that matters.
+      if (row.payload.includes('…')) continue;
+      const expected = anchored.test(row.payload) ? 'PASS' : 'FLAGGED';
+      expect(row.verdict, `${row.label}: "${row.payload}"`).toContain(expected);
+    }
+  });
+
+  test('the stego string passes the same rule the raw ciphertext fails', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const verdicts = await page.locator('#classifier-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        label: (tr.children[0].textContent ?? '').trim(),
+        verdict: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    const stego = verdicts.find((v) => v.label.includes('stego'));
+    const raw = verdicts.filter((v) => !v.label.includes('stego'));
+    expect(stego?.verdict).toContain('PASS');
+    expect(raw).toHaveLength(2);
+    for (const row of raw) expect(row.verdict, row.label).toContain('FLAGGED');
+    await expect(page.locator('#classifier-summary')).toContainText('entire product');
+  });
+
+  /**
+   * The honest half. A rule the format is NOT contained in must flag the stego
+   * string, and the page must say so rather than keeping its triumphant copy.
+   */
+  test('a rule sharper than the format flags the stego string, and the page admits it', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    const area = stego.slice(1, 4);
+    // A rule accepting every area code EXCEPT the one that was produced.
+    const sharper = `\\((?!${area})\\d{3}\\) \\d{3}-\\d{4}`;
+    await page.fill('#classifier-pattern', sharper);
+    await page.click('#classifier-run');
+
+    const verdict = await page.locator('#classifier-body tr').first().evaluate(
+      (tr) => (tr.children[2].textContent ?? '').trim()
+    );
+    expect(verdict).toContain('FLAGGED');
+    await expect(page.locator('#classifier-summary')).toContainText('honest limit');
+  });
+
+  test('resetting restores the format regex and the textbook result', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    await page.fill('#classifier-pattern', '\\d{4}');
+    await page.click('#classifier-run');
+    await page.click('#classifier-reset');
+    expect(await page.inputValue('#classifier-pattern')).toBe(PHONE);
+    await expect(page.locator('#classifier-status-text')).toContainText('both raw encodings dropped');
+  });
+});
+
+test.describe('the pipeline and the cycle walk quote the encode they came from', () => {
+  test('every pipeline node carries a value the trace also reports', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    expect(await text(page, 'pipe-stego-value')).toBe(stego);
+    // N on the pipeline is the N the stat grid prints.
+    expect(await text(page, 'pipe-domain-value')).toContain(await text(page, 'stat-total'));
+    expect(await text(page, 'pipe-message-value')).toContain('UTF-8 byte');
+    for (const id of ['pipe-cipher-value', 'pipe-integer-value', 'pipe-ff1-value']) {
+      expect(await text(page, id), id).not.toBe('—');
+    }
+  });
+
+  test('the walk draws exactly as many landings as the status line counts', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const status = await text(page, 'encode-status-text');
+    const claimed = /took (\d+) FF1 application/.exec(status);
+    // n did not grow for this message, so the walk sentence is present.
+    expect(claimed, status).not.toBeNull();
+    const steps = Number(claimed![1]);
+
+    const dots = await page.locator('#walk-svg .walk-dot').count();
+    expect(dots).toBe(steps);
+    // Exactly one landing is inside [0, N) — the last one. That is what
+    // terminating the walk MEANS, and it is drawn, not asserted.
+    expect(await page.locator('#walk-svg .walk-dot.is-in').count()).toBe(1);
+    expect(await page.locator('#walk-svg .walk-dot.is-out').count()).toBe(steps - 1);
+    await expect(page.locator('#walk-readout')).toContainText('FF1 application');
+  });
+});
+
+test.describe('the highlighted path is the path the string actually walks', () => {
+  test('the scrubber spans the string, and each step names a real transition', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    expect(await page.getAttribute('#pathwalk-scrub', 'max')).toBe(String(stego.length));
+    expect(await page.locator('#pathwalk-string .pathchar').count()).toBe(stego.length);
+
+    // Every (from, class) → to the readout claims must appear in the page's own
+    // transition table, which is built from the DFA by a different code path.
+    await page.click('#dfa-table-details > summary');
+    const table = await page.locator('#dfa-table-body tr').evaluateAll((trs) =>
+      trs.map((tr) => `${(tr.children[0].textContent ?? '').trim()}->${(tr.children[3].textContent ?? '').trim()}`)
+    );
+
+    for (let i = 1; i <= stego.length; i += 1) {
+      await page.fill('#pathwalk-scrub', String(i));
+      await page.dispatchEvent('#pathwalk-scrub', 'input');
+      const readout = await text(page, 'pathwalk-readout');
+      const move = /q(\d+) → q(\d+)/.exec(readout);
+      expect(move, readout).not.toBeNull();
+      expect(table, readout).toContain(`q${move![1]}->q${move![2]}`);
+    }
+    // The last character must land somewhere the page calls accepting.
+    await expect(page.locator('#pathwalk-readout')).toContainText('accepting state');
+  });
+
+  test('the highlight marks exactly one current state, and only states on the path', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    expect(await page.locator('#dfa-graph .dfa-node.is-current').count()).toBe(1);
+    const onPath = await page.locator('#dfa-graph .dfa-node.is-on-path').count();
+    const total = await page.locator('#dfa-graph .dfa-node').count();
+    expect(onPath).toBeGreaterThan(0);
+    expect(onPath).toBeLessThanOrEqual(total);
+
+    await page.fill('#pathwalk-scrub', '0');
+    await page.dispatchEvent('#pathwalk-scrub', 'input');
+    await expect(page.locator('#pathwalk-readout')).toContainText('start state');
+    expect(await page.locator('#dfa-graph .dfa-node.is-current').count()).toBe(1);
+  });
+});
+
+test.describe('the in-page NIST vectors are the ones the test suite runs', () => {
+  test('nine rows, none failing, and the unsupported ones say why', async ({ page }) => {
+    await boot(page);
+    await page.click('#vectors-details > summary');
+    await page.click('#vectors-run');
+    await settleStatus(page, 'vectors-status');
+
+    const rows = await page.locator('#vectors-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        name: (tr.children[0].textContent ?? '').trim(),
+        key: (tr.children[1].textContent ?? '').trim(),
+        expected: (tr.children[3].textContent ?? '').trim(),
+        actual: (tr.children[4].textContent ?? '').trim(),
+        result: (tr.children[5].textContent ?? '').trim()
+      }))
+    );
+    expect(rows).toHaveLength(9);
+    expect(rows.filter((r) => r.result === 'FAIL')).toEqual([]);
+
+    for (const row of rows) {
+      if (row.result === 'PASS') {
+        // The page printed both; they must agree. This is the whole point of
+        // showing "NIST says" beside "this page produced".
+        expect(row.actual, row.name).toBe(row.expected);
+      } else {
+        expect(row.result, row.name).toBe('UNSUPPORTED');
+        expect(row.key, row.name).toContain('AES-192');
+      }
+    }
+    // Chromium has no AES-192, so exactly the three AES-192 samples sit out.
+    expect(rows.filter((r) => r.result === 'UNSUPPORTED')).toHaveLength(3);
+    await expect(page.locator('#vectors-status-text')).toContainText('6 of 9');
+  });
+});
+
+test.describe('spot the fake deals real unrankings', () => {
+  test('every candidate is a member of the language the page compiled', async ({ page }) => {
+    await boot(page);
+    await page.click('#game-deal');
+
+    const values = await page.locator('#game-list label').evaluateAll((els) =>
+      els.map((el) => (el.textContent ?? '').trim())
+    );
+    expect(values.length).toBeGreaterThan(0);
+
+    const pattern = await page.inputValue('#pattern');
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    for (const value of values) {
+      // Generated AND realistic candidates must both match — a decoy the regex
+      // rejects would be a giveaway that has nothing to do with realism.
+      expect(anchored.test(value), `"${value}" vs /${pattern}/`).toBe(true);
+    }
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  test('the reveal scores against the truth and names a tell for every candidate', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.click('#game-deal');
+    const count = await page.locator('#game-list .game-item').count();
+    await page.click('#game-reveal');
+
+    const status = await text(page, 'game-status-text');
+    const score = /^(\d+) of (\d+) correct\./.exec(status);
+    expect(score, status).not.toBeNull();
+    expect(Number(score![2])).toBe(count);
+    // Ticking nothing means every realistic one is right and every generated
+    // one is missed, so the score is exactly the realistic count.
+    expect(Number(score![1])).toBeLessThan(count);
+
+    const tells = await page.locator('#game-list .game-tell').evaluateAll((els) =>
+      els.map((el) => (el.textContent ?? '').trim())
+    );
+    expect(tells.filter((t) => t.length === 0)).toEqual([]);
+    expect(await page.locator('#game-list .game-item.is-generated').count()).toBeGreaterThan(0);
+    expect(await page.locator('#game-list .game-item.is-real').count()).toBeGreaterThan(0);
+  });
+
+  test('the game declines to invent a corpus for hex, and says why', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.click('#game-deal');
+    await expect(page.locator('#game-status-text')).toContainText('no such thing as a realistic random hex');
+    expect(await page.locator('#game-list .game-item').count()).toBe(0);
+  });
+});
+
+test.describe('the shareable link carries state and never carries secrets', () => {
+  test('the fragment restores pattern, n and message in a fresh page', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.fill('#encode-message', 'shared');
+    await page.click('#share-copy');
+
+    const hash = await page.evaluate(() => window.location.hash);
+    expect(hash.length).toBeGreaterThan(1);
+
+    const fresh = await page.context().newPage();
+    await fresh.goto(`.${hash}`);
+    await expect(fresh.locator('#format-status-text')).toContainText('Compiled.');
+    expect(await fresh.inputValue('#pattern')).toBe('[0-9a-f]{32}');
+    expect(await fresh.inputValue('#encode-message')).toBe('shared');
+    expect(await fresh.inputValue('#length')).toBe('32');
+    await fresh.close();
+  });
+
+  test('a real passphrase and the salt are provably absent from the URL', async ({ page }) => {
+    await boot(page);
+    const passphrase = 'zebra-canyon-quartz-77';
+    await page.fill('#encode-passphrase', passphrase);
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#share-copy');
+
+    const href = await page.evaluate(() => window.location.href);
+    const decoded = decodeURIComponent(href).toLowerCase();
+    expect(decoded).not.toContain(passphrase.toLowerCase());
+
+    const bundle = await text(page, 'encode-bundle');
+    const salt = /salt\s+([0-9a-f]{32})/.exec(bundle);
+    expect(salt, bundle).not.toBeNull();
+    expect(decoded).not.toContain(salt![1].toLowerCase());
+  });
+
+  /**
+   * Note what is NOT asserted here: that a weird pattern is rejected. `%%%%` is
+   * a perfectly good regular expression matching four literal percent signs,
+   * and restoring it is the share feature working, not failing. What must hold
+   * is that the fields the page derives numbers from cannot be poisoned.
+   */
+  test('out-of-range and unknown fragment fields are ignored, not applied', async ({ page }) => {
+    await page.goto('.#n=-5&step=999&passphrase=hunter2&__proto__=polluted');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    // The defaults survived: neither the negative n nor the absent pattern took.
+    expect(await page.inputValue('#pattern')).toBe(PHONE);
+    expect(await page.inputValue('#length')).toBe('14');
+    // A step past the end of the path does not open the path.
+    await expect(page.locator('#tour-panel')).toBeHidden();
+    // Nothing was written onto Object.prototype.
+    expect(await page.evaluate(() => ({} as Record<string, unknown>).polluted)).toBeUndefined();
+    // And a passphrase in the fragment is not adopted as one.
+    expect(await page.inputValue('#encode-passphrase')).toBe('');
+  });
+
+  test('a fragment carrying an uncompilable pattern fails visibly and stays usable', async ({
+    page
+  }) => {
+    await page.goto('.#pattern=%28unclosed');
+    await expect(page.locator('#pattern')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.locator('#encode-run')).toBeDisabled();
+    await expect(page.locator('#tour-panel')).toBeHidden();
+
+    // Still a working lab: pick a preset and it recovers.
+    await page.selectOption('#preset', 'phone');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#encode-run')).toBeEnabled();
+  });
+});
+
+test.describe('the guided path ends where it should', () => {
+  test('seven steps, and the last one is the honest limitations', async ({ page }) => {
+    await boot(page);
+    await page.click('#tour-start');
+    await expect(page.locator('#tour-panel')).toBeVisible();
+    expect(await text(page, 'tour-total')).toBe('7');
+
+    for (let step = 1; step < 7; step += 1) {
+      expect(await text(page, 'tour-index')).toBe(String(step));
+      await page.click('#tour-next');
+    }
+    expect(await text(page, 'tour-index')).toBe('7');
+    await expect(page.locator('#tour-body')).toContainText('Spot the fake');
+    await expect(page.locator('#tour-title')).toContainText('honest');
+
+    // Finishing closes the path rather than wrapping round to step one.
+    await page.click('#tour-next');
+    await expect(page.locator('#tour-panel')).toBeHidden();
+  });
+});
+
+test.describe('the hero encoder cannot disagree with the panel below it', () => {
+  test('one encode, one stego string, shown in both places', async ({ page }) => {
+    await boot(page);
+    await page.fill('#quick-message', 'hi');
+    await page.fill('#quick-passphrase', 'correct horse battery staple');
+    await page.click('#quick-run');
+    await settleStatus(page, 'quick-status');
+
+    const hero = await text(page, 'quick-out');
+    const panel = await text(page, 'encode-out');
+    expect(hero).toBe(panel);
+    expect(await page.inputValue('#encode-message')).toBe('hi');
+
+    const pattern = await page.inputValue('#pattern');
+    expect(new RegExp(`^(?:${pattern})$`).test(hero), hero).toBe(true);
+  });
+});
+
+/**
+ * The two limitations that used to be prose. Both panels make a claim about
+ * what an adversary can do, so both are checked against something other than
+ * their own output: the ladder against closed-form arithmetic, the substitution
+ * against the frame byte's independently-computed false-accept rate.
+ */
+test.describe('length leakage is shown, not just asserted', () => {
+  test('a fixed-length preset is one bucket, and the page says it leaks nothing', async ({
+    page
+  }) => {
+    await boot(page);
+    await expect(page.locator('#leak-readout')).toContainText('leaks nothing about the message size');
+
+    const wire = await page.locator('#leak-body tr').evaluateAll((trs) =>
+      trs
+        .map((tr) => (tr.children[3].textContent ?? '').trim())
+        .filter((t) => t !== '—')
+    );
+    // Every message that fits comes out at exactly n = 14 characters.
+    expect(new Set(wire).size).toBe(1);
+    expect(wire[0]).toBe('14 characters');
+  });
+
+  test('a variable-length pattern separates every size, and the ladder matches closed form', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#pattern', '[0-9a-f]{1,64}');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#leak-readout')).toContainText('distinct wire lengths');
+
+    const rows = await page.locator('#leak-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        bytes: Number((tr.children[0].textContent ?? '').trim()),
+        bits: Number((tr.children[1].textContent ?? '').trim()),
+        n: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    for (const row of rows) {
+      // Independent oracle: payload is 8(b+1) bits, a hex character carries 4,
+      // so the smallest n is 2(b+1). The page never computes it that way.
+      expect(row.bits).toBe(8 * (row.bytes + 1));
+      expect(row.n).toBe(String(2 * (row.bytes + 1)));
+    }
+  });
+
+  test('the chosen n is highlighted in the ladder, as it is in the count table', async ({
+    page
+  }) => {
+    await boot(page);
+    const highlighted = await page.locator('#leak-body tr.is-chosen').count();
+    expect(highlighted).toBeGreaterThan(0);
+  });
+});
+
+test.describe('the substitution attack runs for real', () => {
+  test('no substitution ever returns the message that was sent', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-message', 'hi');
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    await expect(page.locator('#swap-status-text')).toContainText('None returned your message');
+    const handed = await page.locator('#swap-body tr').evaluateAll((trs) =>
+      trs.map((tr) => (tr.children[2]?.textContent ?? '').trim())
+    );
+    // The receiver may be handed garbage; it is never handed "hi".
+    for (const value of handed) expect(value).not.toBe('"hi"');
+  });
+
+  test('every substituted string is a genuine member of the language', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    const original = await text(page, 'encode-out');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const pattern = await page.inputValue('#pattern');
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    const swapped = await page.locator('#swap-body tr th[scope="row"]').evaluateAll((ths) =>
+      ths.map((th) => (th.textContent ?? '').trim())
+    );
+    expect(swapped.length).toBeGreaterThan(0);
+    for (const value of swapped) {
+      expect(anchored.test(value), `"${value}" vs /${pattern}/`).toBe(true);
+      // Substituting the original is a no-op, not an attack.
+      expect(value).not.toBe(original);
+    }
+  });
+
+  test('the three outcomes partition the run, and the totals agree', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const read = async (id: string): Promise<[number, number]> => {
+      const parsed = /^(\d+) of (\d+)$/.exec(await text(page, id));
+      expect(parsed, id).not.toBeNull();
+      return [Number(parsed![1]), Number(parsed![2])];
+    };
+    const [frame, total] = await read('swap-frame');
+    const [utf8] = await read('swap-utf8');
+    const [accepted] = await read('swap-accepted');
+    expect(frame + utf8 + accepted).toBe(total);
+    expect(total).toBe(60);
+  });
+
+  /**
+   * The cross-check that makes the panel evidence rather than theatre: the
+   * share of substitutions getting past the frame byte, MEASURED by running the
+   * cipher, against the closed form that only counts intervals of [0, N).
+   */
+  test('the measured pass-the-frame rate tracks the closed-form prediction it prints', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const rate = await text(page, 'swap-rate');
+    const parsed = /^(\d+)% vs ([\d.]+)%$/.exec(rate);
+    expect(parsed, rate).not.toBeNull();
+    const measured = Number(parsed![1]);
+    const predicted = Number(parsed![2]);
+
+    // The phone slice's closed form is ~43.1%, and the folklore 1/256 is not.
+    expect(predicted).toBeGreaterThan(42);
+    expect(predicted).toBeLessThan(44);
+    // 60 Bernoulli trials at p = 0.43 have a standard error near 6.4 points.
+    expect(Math.abs(measured - predicted)).toBeLessThan(20);
+
+    // And the figures in the table agree with that percentage.
+    const utf8 = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-utf8'))!;
+    const accepted = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-accepted'))!;
+    const pastFrame = Number(utf8[1]) + Number(accepted[1]);
+    expect(Math.round((pastFrame / Number(utf8[2])) * 100)).toBe(measured);
+  });
+
+  test('changing the format retires the attack along with the stego string', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+    await expect(page.locator('#swap-accepted')).not.toHaveText('—');
+
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#swap-accepted')).toHaveText('—');
+    await expect(page.locator('#swap-verdict')).toContainText('Nothing substituted yet');
+  });
+});

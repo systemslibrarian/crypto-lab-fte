@@ -58,7 +58,7 @@ import {
   importFf1Key,
   walkWidth
 } from "./ff1.ts";
-import { aesCtrDecrypt, aesCtrEncrypt, deriveKeys, randomSalt } from "./keys.ts";
+import { DerivedKeys, aesCtrDecrypt, aesCtrEncrypt, deriveKeys, randomSalt } from "./keys.ts";
 
 /** The lab's stated floor: a format that cannot hold a byte is not a format. */
 export const MIN_USEFUL_CAPACITY_BITS = 8;
@@ -141,6 +141,8 @@ export interface EncodeTrace {
   ciphered: bigint;
   /** FF1 applications the cycle walk took. 1 = landed first try. */
   walkSteps: number;
+  /** Every value the walk produced, so the page can draw it. Last = `ciphered`. */
+  walkLandings: bigint[];
   ff1KeyHex: string;
   messageKeyHex: string;
 }
@@ -213,6 +215,7 @@ export async function encode(input: EncodeInput): Promise<EncodeResult> {
       walkBits: walkWidth(table.total),
       ciphered: walk.value,
       walkSteps: walk.steps,
+      walkLandings: walk.landings,
       ff1KeyHex: bytesToHex(keys.ff1KeyBytes),
       messageKeyHex: keys.messageKeyHex
     }
@@ -257,8 +260,37 @@ export interface DecodeInput {
   salt: Uint8Array;
 }
 
+/**
+ * Key material for a decode, derived once.
+ *
+ * Split out because the substitution demo runs a few hundred decodes against
+ * ONE (passphrase, salt) pair, and PBKDF2 at 600,000 iterations takes about a
+ * second. Deriving per trial would make the demo take ten minutes; deriving
+ * once makes it take a moment. The single-decode path below is unchanged and
+ * still derives for itself, so nothing about the ordinary flow moves.
+ */
+export interface PreparedDecode {
+  keys: DerivedKeys;
+  ff1Key: CryptoKey;
+  salt: Uint8Array;
+}
+
+export async function prepareDecode(passphrase: string, salt: Uint8Array): Promise<PreparedDecode> {
+  const keys = await deriveKeys(passphrase, salt);
+  return { keys, ff1Key: await importFf1Key(keys.ff1KeyBytes), salt };
+}
+
 export async function decode(input: DecodeInput): Promise<DecodeResult> {
   const { format, stego, passphrase, salt } = input;
+  return decodeWith(format, stego, await prepareDecode(passphrase, salt));
+}
+
+export async function decodeWith(
+  format: CompiledFormat,
+  stego: string,
+  prepared: PreparedDecode
+): Promise<DecodeResult> {
+  const { keys, ff1Key, salt } = prepared;
   const n = Array.from(stego).length;
   if (n === 0) throw new FormatError("Nothing to decode.");
   if (n > MAX_N) throw new FormatError(`The stego string is longer than n_max = ${MAX_N}.`);
@@ -270,9 +302,6 @@ export async function decode(input: DecodeInput): Promise<DecodeResult> {
     );
   }
   const index = rank(format.dfa, table, stego);
-
-  const keys = await deriveKeys(passphrase, salt);
-  const ff1Key = await importFf1Key(keys.ff1KeyBytes);
   const walk = await cycleWalkDecrypt(ff1Key, table.total, index, salt);
 
   const framed = bigIntToMinimalBytesBE(walk.value);
@@ -302,6 +331,35 @@ export async function decode(input: DecodeInput): Promise<DecodeResult> {
     ciphertextHex: bytesToHex(ciphertext),
     walkSteps: walk.steps
   };
+}
+
+/**
+ * The share of wrong keys the 0x01 frame byte lets through, in closed form.
+ *
+ * A wrong key — or a substituted string — makes the inverse cycle walk land
+ * uniformly in [0, N). The decoder accepts if the MINIMAL big-endian encoding
+ * of that value starts with 0x01, and the leading byte of a minimal encoding is
+ * NOT uniform over 0..255, so the intuitive "1 in 256" is simply wrong: for the
+ * phone slice it is about 43%.
+ *
+ * Computed by summing the sub-ranges of [0, N) whose leading byte is 0x01 —
+ * a different route from the decoder's, which strips bytes rather than counting
+ * intervals. That independence is the point: `src/fte.test.ts` checks this
+ * against the shipped presets, and the page checks its own MEASURED rate
+ * against it, so a drift in either direction is visible.
+ */
+export function frameByteFalseAccept(total: bigint): number {
+  if (total <= 0n) return 0;
+  let accepted = 0n;
+  for (let bytes = 1; bytes <= 64; bytes += 1) {
+    const lo = 1n << BigInt(8 * (bytes - 1));
+    const hi = 2n << BigInt(8 * (bytes - 1));
+    const start = lo < total ? lo : total;
+    const end = hi < total ? hi : total;
+    if (end > start) accepted += end - start;
+    if (1n << BigInt(8 * bytes) >= total) break;
+  }
+  return Number((accepted * 1_000_000n) / total) / 1_000_000;
 }
 
 export { RegexError, DfaTooLargeError };
