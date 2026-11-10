@@ -128,6 +128,7 @@ jobs:
       # and the PR stays open for a human. What keeps majors from arriving inside
       # an unmergeable grouped PR is dependabot.yml, not this job.
       - name: Merge any bump whose gate went green
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
         # Retry: a sibling PR merging first moves main underneath us and GitHub
         # rejects with "Base branch was modified". That race is benign, so try
         # again rather than failing the run over it.
