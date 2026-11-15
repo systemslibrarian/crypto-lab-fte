@@ -1,5 +1,5 @@
 /**
- * FF1 (NIST SP 800-38G §5.2), plus cycle-walking to reach an arbitrary domain.
+ * FF1 (NIST SP 800-38G §5.1), plus cycle-walking to reach an arbitrary domain.
  *
  * FF1 is a 10-round Feistel network whose round function is AES-CBC-MAC over a
  * formatted block. It permutes the strings of a fixed length over a fixed radix
@@ -19,7 +19,7 @@
  * of length n a regular expression accepts — and the format is recovered by
  * unranking. Same cipher, one more layer of combinatorics.
  *
- * AES-128 is used, per the §5.2 prerequisite that the block cipher be AES with a
+ * AES-128 is used, per the §5.1 prerequisite that the block cipher be AES with a
  * 128-, 192-, or 256-bit key; the FF1 key here is 128 bits of PBKDF2 output.
  */
 
@@ -131,7 +131,7 @@ function mod(a: bigint, n: bigint): bigint {
   return ((a % n) + n) % n;
 }
 
-/** The fixed 16-byte block P of SP 800-38G §5.2, step 5. */
+/** The fixed 16-byte block P of SP 800-38G §5.1, Algorithm 7, step 5. */
 function buildP(radix: number, n: number, u: number, tweakLength: number): Uint8Array {
   const p = new Uint8Array(16);
   p[0] = 0x01;

@@ -62,16 +62,24 @@ export function fromSymbols(symbols: Uint8Array, alphabet: string): string {
  * `unsupported` is not a failure, and conflating the two would be a lie in the
  * loud direction.
  *
- * WebCrypto has no AES-192. The spec never included it, and no browser
- * implements it, so `importKey` rejects a 24-byte AES key outright — which
- * takes samples 4, 5 and 6 off the table in any browser while leaving them
- * perfectly runnable under Node, whose WebCrypto does implement it.
+ * The Web Cryptography API itself allows a 192-bit AES key: for AES-CBC,
+ * AES-CTR, AES-GCM and AES-KW alike, Generate Key, Import Key and Get key
+ * length all take 128, 192 or 256. The gap is an engine's, not the
+ * specification's. Chromium declines that length on purpose —
+ * `components/webcrypto/algorithms/aes.cc` carries the comment "192-bit AES is
+ * intentionally unsupported (http://crbug.com/533699)" and raises
+ * OperationError, "192-bit AES keys are not supported" — so in Chrome and Edge
+ * `importKey` rejects a 24-byte AES key and samples 4, 5 and 6 come off the
+ * table. Gecko and WebKit accept all three lengths, so in Firefox and Safari
+ * those three run, as they do under Node.
  *
- * That asymmetry is worth knowing and easy to miss: a CI suite running on Node
- * goes green on all nine and tells you nothing about what a visitor's browser
- * can actually reproduce. The in-page runner is what surfaced it. So the table
- * shows all nine, runs the six it can, and says plainly why the other three are
- * blank — rather than printing FAIL against an implementation that is correct.
+ * Which is why nothing here states in advance how many will run: `aes192Supported`
+ * asks the engine at run time, and the table shows all nine, runs the ones this
+ * engine can, and says plainly why any blank row is blank — rather than printing
+ * FAIL against an implementation that is correct. The asymmetry is worth knowing
+ * and easy to miss: a CI suite running on Node goes green on all nine and tells
+ * you nothing about what a visitor's browser can actually reproduce. The in-page
+ * runner is what surfaced it.
  */
 export type VectorStatus = "pass" | "fail" | "unsupported";
 
@@ -87,12 +95,8 @@ export interface VectorRun {
   note: string;
 }
 
-/**
- * Distinguish "this platform cannot even hold the key" from "the answer came
- * out wrong". Only the second is a defect in this code.
- */
-function isUnsupportedKey(error: unknown, vector: Ff1Vector): boolean {
-  if (vector.keyBits !== 192) return false;
+/** Did the engine turn the key away for its length, rather than miscompute? */
+function refusedTheKeyLength(error: unknown): boolean {
   const message = String((error as Error)?.message ?? error).toLowerCase();
   return (
     message.includes("192") ||
@@ -100,6 +104,35 @@ function isUnsupportedKey(error: unknown, vector: Ff1Vector): boolean {
     message.includes("unsupported") ||
     message.includes("operation is not supported")
   );
+}
+
+/**
+ * Distinguish "this platform cannot even hold the key" from "the answer came
+ * out wrong". Only the second is a defect in this code.
+ */
+function isUnsupportedKey(error: unknown, vector: Ff1Vector): boolean {
+  if (vector.keyBits !== 192) return false;
+  return refusedTheKeyLength(error);
+}
+
+/** How many of the nine need a key length an engine is free to decline. */
+export const AES192_VECTORS = FF1_VECTORS.filter((v) => v.keyBits === 192).length;
+
+/**
+ * Does this engine's WebCrypto accept a 192-bit AES key? Answered by importing
+ * one, because that is the only answer worth having: the Web Cryptography API
+ * allows the length, engines differ on whether they honour it, and a user-agent
+ * string is not evidence either way. Called once on arrival so the page can
+ * state a count it has actually checked.
+ */
+export async function aes192Supported(): Promise<boolean> {
+  try {
+    await importFf1Key(hexToBytes(K192));
+    return true;
+  } catch (error) {
+    if (refusedTheKeyLength(error)) return false;
+    throw error;
+  }
 }
 
 /**
@@ -119,7 +152,7 @@ export async function runVector(vector: Ff1Vector): Promise<VectorRun> {
         roundTrip: "",
         pass: false,
         status: "unsupported",
-        note: "AES-192 — WebCrypto does not implement it, so no browser can run this one. Covered by the Node test suite."
+        note: "AES-192 — this browser's WebCrypto refused the key, so FF1 was never reached. Not a defect in this code: the Web Cryptography API allows 128-, 192- and 256-bit AES keys, and Chromium declines the 192-bit one deliberately (crbug.com/533699). Covered by the Node test suite."
       };
     }
     throw error;

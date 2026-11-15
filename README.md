@@ -82,9 +82,14 @@ with something cryptic.
 `{n,m}` · concatenation · `|` · `(...)` and `(?:...)` · `^` and `$`, which parse to epsilon.
 
 **Not supported, and each rejected with its own message:** backreferences · lookaround · named
-groups · open-ended `{n,}` · a repeat bound above 512 · literals outside Sigma. The first two are
-not missing features: a language with a backreference or lookaround is not regular, so it has no
-DFA and no exact count, and the parser says that rather than implying it could be added.
+groups · open-ended `{n,}` · a repeat bound above 512 · literals outside Sigma. Only the first is
+beyond the method: a language with a backreference is in general not regular, so it has no DFA and
+no exact count, and the parser says that rather than implying it could be added. Lookaround is not
+in that class — a language written with lookahead or lookbehind is still regular, since regular
+languages are closed under intersection and complement, and Miyazaki and Minamide give an explicit
+conversion from regular expressions with lookahead to DFAs (*Derivatives of Regular Expressions
+with Lookahead*, Journal of Information Processing 27, 422-430, 2019) — and a named group is only
+syntax. Both are simply **not implemented here**, which is what the parser now says.
 
 Two deliberate deviations from a general-purpose engine: matching is always **full-string**, so
 an anchor is either redundant or a lie and is accepted and ignored; and `.` is printable ASCII
@@ -199,10 +204,13 @@ A tour of the interactive panels, numbered as the page numbers them.
    strings twice and the second attempt is refused through the same path as a forgery, with the
    same words, so there is no replay oracle either.
 10. **References and glossary.** The four sources this is built from, nine terms defined, and a
-   **known-answer panel that runs the NIST vectors in your browser**. Six of the nine run; the
-   other three use AES-192, which WebCrypto does not implement in any browser, so they are marked
-   UNSUPPORTED rather than failed and are covered by the Node suite. That split is worth noticing:
-   a green CI run on Node says nothing about what a visitor's browser can reproduce.
+   **known-answer panel that runs the NIST vectors in your browser**. How many run depends on the
+   browser, so the panel detects it rather than asserting it: three of the nine need a 192-bit AES
+   key, and while the Web Cryptography API allows that length, Chromium declines it on purpose
+   (`crbug.com/533699`), so Chrome and Edge reproduce six where Firefox and Safari reproduce all
+   nine. Anything refused is marked UNSUPPORTED rather than failed and is covered by the Node
+   suite. That split is worth noticing: a green CI run on Node says nothing about what a visitor's
+   browser can reproduce.
 
 Across the top: a **guided path** of seven steps that ends deliberately on the honest limitations
 rather than on the encode that makes the construction look good, and a **copy-link button** that
@@ -353,7 +361,7 @@ before ranking.
    with Format-Transforming Encryption*, CCS 2013 — the FTE construction and libfte, aimed
    squarely at regex-based DPI. <https://eprint.iacr.org/2012/494>
 4. NIST, *SP 800-38G: Recommendation for Block Cipher Modes of Operation: Methods for
-   Format-Preserving Encryption*, March 2016 — FF1, implemented here from §5.2 and checked against
+   Format-Preserving Encryption*, March 2016 — FF1, implemented here from §5.1 and checked against
    all nine published sample vectors. Draft Rev. 1 (Feb 2025) supplies the `10^6` minimum domain
    this lab enforces. <https://csrc.nist.gov/pubs/sp/800/38/g/final>
 

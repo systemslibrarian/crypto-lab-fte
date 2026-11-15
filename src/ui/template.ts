@@ -175,9 +175,10 @@ export function template(): string {
           Nothing here is simulated. Every encode below runs WebCrypto PBKDF2 and AES-CTR, a
           hand-rolled FF1 that passes all nine NIST SP 800-38G sample vectors in the test suite,
           and a real rank/unrank walk over the DFA your pattern compiles to. You can
-          <a href="#refs-heading">run those vectors yourself</a>, in this tab: six of the nine
-          will reproduce here, and the three that will not are the AES-192 ones, because WebCrypto
-          does not implement AES-192 in any browser.
+          <a href="#refs-heading">run those vectors yourself</a>, in this tab:
+          <span id="aes192-intro">how many of the nine reproduce depends on your browser — three of
+          them need a 192-bit AES key, which the Web Cryptography API allows but Chromium declines
+          on purpose</span>.
         </p>
         <p class="hint">
           Sibling demo: <a href="${FORMAT_WARD_URL}" target="_blank" rel="noopener">Format Ward</a>
@@ -931,7 +932,7 @@ export function template(): string {
           </li>
           <li>
             NIST, <em>SP 800-38G: Recommendation for Block Cipher Modes of Operation: Methods for
-            Format-Preserving Encryption</em>, March 2016 — FF1, implemented here from §5.2 and
+            Format-Preserving Encryption</em>, March 2016 — FF1, implemented here from §5.1 and
             checked against all nine published sample vectors.
             <a href="https://csrc.nist.gov/pubs/sp/800/38/g/final" target="_blank" rel="noopener">csrc.nist.gov</a>
           </li>
@@ -947,11 +948,14 @@ export function template(): string {
               ways: the ciphertext must equal NIST's, and decryption must return the plaintext.
             </p>
             <p class="hint">
-              Six of the nine will run here. The other three use AES-192, which WebCrypto does not
-              implement in any browser, so the key import is refused before FF1 is reached. Those
-              three are marked UNSUPPORTED rather than failed, and they are covered by the Node test
-              suite, which runs all nine. That split is worth noticing on its own: a green CI run on
-              Node says nothing about what a visitor's browser can actually reproduce.
+              <span id="aes192-note">Three of the nine use a 192-bit AES key. The Web Cryptography
+              API allows that length — Generate Key and Import Key both take 128, 192 or 256 — but
+              Chromium refuses it on purpose, so in Chrome and Edge the key import is refused before
+              FF1 is reached, while Firefox and Safari accept it. This page checks at run time which
+              side your browser is on.</span>
+              Anything refused is marked UNSUPPORTED rather than failed, and is covered by the Node
+              test suite, which runs all nine. That split is worth noticing on its own: a green CI
+              run on Node says nothing about what a visitor's browser can actually reproduce.
             </p>
             <div class="button-row">
               <button id="vectors-run" type="button" class="primary">Run all nine</button>

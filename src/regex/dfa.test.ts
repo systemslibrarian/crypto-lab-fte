@@ -33,6 +33,17 @@ describe("parser", () => {
     // are outside the class of languages this construction can count at all.
     expect(() => parseRegex("(a)\\1")).toThrow(/not regular/);
     expect(() => parseRegex("(a)\\1")).toThrow(/Backreference/);
+    // Lookaround and named groups get the OTHER message, and must not get the
+    // backreference one. A language written with lookahead or lookbehind is
+    // still regular — regular languages are closed under intersection and
+    // complement, and Miyazaki and Minamide convert lookahead to a DFA
+    // (Journal of Information Processing 27, 422-430, 2019) — and a named group
+    // is only syntax. Both are unimplemented here, not impossible.
+    expect(() => parseRegex("a(?=b)")).toThrow(/not implemented in this lab's regex subset/);
+    expect(() => parseRegex("a(?=b)")).not.toThrow(/not regular/);
+    expect(() => parseRegex("(?<=a)b")).toThrow(/not implemented in this lab's regex subset/);
+    expect(() => parseRegex("(?<year>\\d{4})")).toThrow(/not implemented in this lab's regex subset/);
+    expect(() => parseRegex("(?<year>\\d{4})")).not.toThrow(/not regular/);
   });
 
   it("treats anchors as no-ops because matching is always full-string", () => {

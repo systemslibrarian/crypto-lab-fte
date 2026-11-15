@@ -3,9 +3,17 @@
  *
  * The subset is small on purpose. Every construct here has to survive being
  * turned into a DFA and then counted exactly, so anything that is not a regular
- * language — backreferences, lookaround — is not merely unimplemented, it is
+ * language — a backreference, for one — is not merely unimplemented, it is
  * outside what the construction can do at all. The parser says so by name
  * rather than failing later with something cryptic.
+ *
+ * Lookaround is a different case and gets a different message. A language
+ * written with lookahead or lookbehind is still regular — regular languages are
+ * closed under intersection and complement — and Miyazaki and Minamide give an
+ * explicit conversion from regular expressions with lookahead to DFAs
+ * (Derivatives of Regular Expressions with Lookahead, Journal of Information
+ * Processing 27, 422-430, 2019). A named group is only syntax. Both are simply
+ * not implemented in this subset.
  *
  * Supported:
  *   literals (printable ASCII) · [abc] [a-z] [^…] · \d \w \s · .
@@ -174,7 +182,7 @@ class Parser {
       if (this.src.startsWith("?:", this.pos)) this.pos += 2;
       else if (this.peek() === "?") {
         this.fail(
-          `Lookaround and named groups are not regular languages this lab can count — remove the '(?' at position ${this.pos}.`,
+          `Lookaround and named groups are not implemented in this lab's regex subset — remove the '(?' at position ${this.pos}.`,
           this.pos
         );
       }

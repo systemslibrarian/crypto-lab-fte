@@ -756,9 +756,39 @@ test.describe('the in-page NIST vectors are the ones the test suite runs', () =>
         expect(row.key, row.name).toContain('AES-192');
       }
     }
-    // Chromium has no AES-192, so exactly the three AES-192 samples sit out.
-    expect(rows.filter((r) => r.result === 'UNSUPPORTED')).toHaveLength(3);
-    await expect(page.locator('#vectors-status-text')).toContainText('6 of 9');
+    // Chromium declines a 192-bit AES key on purpose (crbug.com/533699) even
+    // though the Web Cryptography API allows the length, so under this project
+    // exactly the three AES-192 samples sit out. Firefox, Safari and Node run
+    // all nine, which is why the page measures the count instead of stating one.
+    const unsupported = rows.filter((r) => r.result === 'UNSUPPORTED');
+    expect(unsupported).toHaveLength(3);
+    const ran = rows.length - unsupported.length;
+    await expect(page.locator('#vectors-status-text')).toContainText(`${ran} of ${rows.length}`);
+    await expect(page.locator('#vectors-status-text')).toContainText('crbug.com/533699');
+  });
+
+  test('the two sentences about the AES-192 split come from the run-time probe', async ({
+    page
+  }) => {
+    await boot(page);
+    // Both carry a count that is a property of the browser rather than of the
+    // page, so neither may still be showing the markup's no-count wording.
+    await expect(page.locator('#aes192-intro')).toContainText('6 of the 9 reproduce here');
+    await expect(page.locator('#aes192-intro')).not.toContainText('depends on your browser');
+    await page.click('#vectors-details > summary');
+    await expect(page.locator('#aes192-note')).toContainText('6 of the 9 run here');
+    // And the claim this replaced: the gap is an engine's, not the API's.
+    await expect(page.locator('#aes192-note')).toContainText('the Web Cryptography API allows it');
+  });
+
+  test('the FF1 citation names the section SP 800-38G actually puts FF1 in', async ({ page }) => {
+    await boot(page);
+    // SP 800-38G §5.1 is FF1 — Algorithm 7, FF1.Encrypt, whose step 5 defines
+    // the fixed block P this lab builds. §5.2 is FF3.
+    const nist = page.locator('section.refs > ol > li').last();
+    await expect(nist).toContainText('SP 800-38G');
+    await expect(nist).toContainText('§5.1');
+    await expect(nist).not.toContainText('§5.2');
   });
 });
 

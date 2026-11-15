@@ -53,7 +53,14 @@ import { deriveRoot } from "../schedule.ts";
 import { Identity, agree, bestSuite, generateIdentity } from "../handshake.ts";
 import { SealedFragments, openFragments, plan, sealFragments } from "../frag.ts";
 import { ReplayWindow, accept, createWindow, describe as describeWindow } from "../replay.ts";
-import { FF1_VECTORS, VectorRun, runVector, tally } from "../vectors.ts";
+import {
+  AES192_VECTORS,
+  FF1_VECTORS,
+  VectorRun,
+  aes192Supported,
+  runVector,
+  tally
+} from "../vectors.ts";
 import { assertNoSecrets, decodeState, encodeState } from "../share.ts";
 import { CurveInput, WalkInput, renderCurve, renderWalk, walkReadout } from "./charts.ts";
 import { TOUR } from "./tour.ts";
@@ -1082,7 +1089,7 @@ async function runVectors(): Promise<void> {
   const skipped =
     counts.unsupported === 0
       ? ""
-      : ` ${counts.unsupported} could not run: WebCrypto has no AES-192, so no browser can reproduce those three — they are covered by the Node test suite, which runs all ${counts.total}.`;
+      : ` ${counts.unsupported} could not run: this browser's WebCrypto refused the 192-bit AES key they need. The Web Cryptography API allows that length; Chromium declines it deliberately (crbug.com/533699), while Firefox, Safari and Node accept it. Those ${counts.unsupported} are covered by the Node test suite, which runs all ${counts.total}.`;
 
   setStatus(
     "vectors-status",
@@ -1092,6 +1099,43 @@ async function runVectors(): Promise<void> {
       : `${counts.failed} of ${counts.total} FAILED — this implementation does NOT match SP 800-38G. Do not trust anything else on this page.`
   );
   button.disabled = false;
+}
+
+/**
+ * Ask this engine whether it will hold a 192-bit AES key, then let both places
+ * that mention the split say what was actually found. The page used to print a
+ * fixed "six of the nine", which is right in Chrome and wrong in Firefox: the
+ * count is a property of the visitor's browser, so it has to be measured there.
+ */
+async function renderAes192Support(): Promise<void> {
+  const intro = document.getElementById("aes192-intro");
+  const note = document.getElementById("aes192-note");
+  if (!intro && !note) return;
+
+  let supported: boolean;
+  try {
+    supported = await aes192Supported();
+  } catch {
+    // The probe failed for some reason other than the key length. Leave the
+    // cautious static wording, which states no count, rather than guess.
+    return;
+  }
+
+  const total = FF1_VECTORS.length;
+  const runnable = supported ? total : total - AES192_VECTORS;
+  const chromiumRuns = total - AES192_VECTORS;
+
+  if (intro) {
+    intro.textContent = supported
+      ? `all ${runnable} of the ${total} reproduce here, because this browser accepts the 192-bit AES key that ${AES192_VECTORS} of them need — Chromium refuses that length on purpose (crbug.com/533699), so the same panel shows ${chromiumRuns} in Chrome and Edge`
+      : `${runnable} of the ${total} reproduce here; the other ${AES192_VECTORS} need a 192-bit AES key and this browser refuses it — Chromium declines that length deliberately (crbug.com/533699), though the Web Cryptography API allows it and Firefox and Safari accept it`;
+  }
+
+  if (note) {
+    note.textContent = supported
+      ? `All ${runnable} of the ${total} run here: this browser accepts the 192-bit AES key that ${AES192_VECTORS} of them use. Chromium refuses that length on purpose (crbug.com/533699), though the Web Cryptography API allows it — Generate Key and Import Key both take 128, 192 or 256 — so the same panel shows only ${chromiumRuns} in Chrome and Edge.`
+      : `${runnable} of the ${total} run here. The other ${AES192_VECTORS} use a 192-bit AES key and this browser refuses it: Chromium declines that length deliberately (crbug.com/533699), though the Web Cryptography API allows it — Generate Key and Import Key both take 128, 192 or 256 — and Firefox and Safari accept it.`;
+  }
 }
 
 // ── Capacity curve ──────────────────────────────────────────────────────────
@@ -2094,6 +2138,9 @@ export function initUI(root: HTMLElement): void {
   // An empty tbody under a header row is `th-has-data-cells`, so the not-yet-run
   // state is a real row saying so — the same rule the count table follows.
   placeholderRow($("vectors-body"), 6, "Not run yet — press the button above.");
+  // Both sentences about the AES-192 split carry a count, so they are filled
+  // from a run-time probe instead of being written into the markup.
+  void renderAes192Support();
   placeholderRow($("hs-body"), 3, "No exchange yet — press the button above.");
   $("replay-window").textContent = describeWindow(state.replayWindow);
 }

@@ -10,7 +10,7 @@ import {
   importFf1Key,
   walkWidth
 } from "./ff1.ts";
-import { FF1_VECTORS, runAllVectors, runVector, tally } from "./vectors.ts";
+import { AES192_VECTORS, FF1_VECTORS, aes192Supported, runAllVectors, runVector, tally } from "./vectors.ts";
 
 /**
  * The nine sample vectors published by NIST alongside SP 800-38G. They pin the
@@ -127,10 +127,11 @@ describe("the in-page vector runner", () => {
   });
 
   /**
-   * Node's WebCrypto DOES implement AES-192, so all nine run here. A browser
-   * has no AES-192 at all and marks samples 4-6 unsupported — which is exactly
-   * the asymmetry the in-page runner exists to make visible, and the reason
-   * this suite alone cannot vouch for what a visitor sees.
+   * Node's WebCrypto accepts a 192-bit AES key, so all nine run here. The Web
+   * Cryptography API allows that length too; Chromium declines it on purpose
+   * (crbug.com/533699) and marks samples 4-6 unsupported — which is exactly the
+   * asymmetry the in-page runner exists to make visible, and the reason this
+   * suite alone cannot vouch for what a visitor sees.
    */
   it("runs all nine under Node, where AES-192 is available", async () => {
     const runs = await runAllVectors();
@@ -138,6 +139,19 @@ describe("the in-page vector runner", () => {
     expect(counts.total).toBe(9);
     expect(counts.failed).toBe(0);
     expect(counts.passed + counts.unsupported).toBe(9);
+  });
+
+  /**
+   * The count the page prints is whatever the engine turns out to accept, so the
+   * probe the page asks has to agree with what the vectors then do. Three of the
+   * nine are the AES-192 ones.
+   */
+  it("decides the count from a run-time probe, not from a fixed number", async () => {
+    expect(AES192_VECTORS).toBe(3);
+    const supported = await aes192Supported();
+    const counts = tally(await runAllVectors());
+    expect(counts.unsupported).toBe(supported ? 0 : AES192_VECTORS);
+    expect(counts.passed).toBe(supported ? counts.total : counts.total - AES192_VECTORS);
   });
 
   it("never reports an unsupported vector as a failure", async () => {
