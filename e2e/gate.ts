@@ -936,8 +936,8 @@ export async function driveAllStates(page: Page, theme: string): Promise<void> {
   // The preset with no defensible corpus declines to play, in words.
   await choosePreset(page, 'hex', '[0-9a-f]{32}');
   await page.click('#game-deal');
-  await expect(page.locator('#game-status-text')).toContainText('no such thing as a realistic');
-  await scanAt('spot the fake declined — hex has no realistic distribution');
+  await expect(page.locator('#game-status-text')).toContainText('no single defensible real-world distribution');
+  await scanAt('spot the fake declined — hex has no defensible real-world distribution');
   await choosePreset(page, 'phone', '\\(\\d{3}\\) \\d{3}-\\d{4}');
 
   // ── The NIST vectors ────────────────────────────────────────────────────
