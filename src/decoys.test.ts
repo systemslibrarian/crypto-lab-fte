@@ -24,7 +24,7 @@ describe("realistic decoys", () => {
     expect("make" in realismFor("phone")).toBe(true);
     expect("make" in realismFor("ipv4")).toBe(true);
     const hex = realismFor("hex");
-    expect("why" in hex && hex.why).toContain("no such thing as a realistic random hex");
+    expect("why" in hex && hex.why).toContain("no single defensible real-world distribution");
     const custom = realismFor("something-else");
     expect("why" in custom).toBe(true);
   });

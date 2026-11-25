@@ -60,7 +60,7 @@ export const TOUR: TourStep[] = [
   {
     title: "Now the honest part",
     body:
-      "A regex classifier is beaten. A human is not. Play Spot the fake below, then read the three limitations — uniform is not realistic, length leaks, and there is no MAC. This is the step the demo exists for.",
+      "A regex classifier is beaten. A human is not. Play Spot the fake below, then read the three limitations — format membership is not realistic traffic, length leaks, and there is no MAC. This is the step the demo exists for.",
     target: "limits-heading"
   }
 ];

@@ -110,7 +110,7 @@ export function template(): string {
       <div class="cl-hero-context">
         <p class="cl-hero-desc">
           Compile a regular expression to a minimal DFA, count its length-n language exactly, and
-          encipher real AES-CTR ciphertext into that count — so the output is a uniformly random
+          encipher real AES-CTR ciphertext into that count — so the output is guaranteed to be a
           member of the language, and a regex classifier watching the wire sees a phone number.
         </p>
         <aside class="cl-hero-why" aria-label="Why it matters">
@@ -169,7 +169,8 @@ export function template(): string {
           numbers them 0 to N-1 in strict alphabetical order. Encrypting a message now means: encrypt
           normally, read the ciphertext as one big number, encipher that number into the range
           [0, N), and look up the string with that number. The result is a string the regex accepts,
-          drawn uniformly from every string it accepts.
+          but format membership alone does not make repeated outputs uniform over every string it
+          accepts.
         </p>
         <p class="callout">
           Nothing here is simulated. Every encode below runs WebCrypto PBKDF2 and AES-CTR, a
@@ -546,28 +547,30 @@ export function template(): string {
         </p>
 
         <div class="limit">
-          <h3>Uniform is not the same as realistic</h3>
+          <h3>Format membership is not realistic traffic</h3>
           <p>
             Format conformance defeats a <em>regex</em> classifier — that is the FTE threat model, and
-            within it the guarantee is exact: the output is a uniformly random member of the language,
-            so no regex that accepts the language can distinguish it. It defeats nothing else. A phone
-            number drawn uniformly from (000) 000-0000 through (999) 999-9999 has no area code
-            structure, no exchange conventions, and a leading zero about a tenth of the time. A human
-            glancing at it, a statistical test on digit frequencies, or a model trained on real phone
-            numbers all separate it from the genuine article immediately. Dyer et al. say so in the
-            paper that introduced FTE: it targets regex-based DPI, not traffic analysis.
+            its exact guarantee is membership: every output matches the chosen regex. That does not
+            make the output distribution uniform over the language. With one fixed passphrase and
+            message, this lab's 128-bit salt can select at most 2<sup>128</sup> outputs, while the
+            64-character base64 language has 64<sup>64</sup> = 2<sup>384</sup> members. Even a
+            hypothetical uniform phone-number draw would have no area-code structure or exchange
+            conventions. A human glance, a statistical test, or a model trained on real phone numbers
+            can separate generated values from genuine traffic. Section 3 of Dyer et al. guarantees
+            that FTE ciphertext matches the specified regex; it does not claim exact uniformity.
           </p>
 
           <div class="game" id="game">
             <h4 id="game-heading">Spot the fake</h4>
             <p class="hint" id="game-hint">
-              Half of these came out of the encoder above, by the same unranking that produced your
-              stego string. Half are shaped the way the real world shapes them. Tick the ones you
-              think the encoder made.
+              Half are uniformly sampled members of the regex language, using the same unranking
+              function as the encoder. Half are shaped the way the real world shapes them. Tick the
+              uniform language draws. This game illustrates realism; it does not claim the encoder's
+              own output distribution is uniform.
             </p>
 
             <fieldset class="game-set" id="game-set">
-              <legend id="game-legend">Which of these did the encoder produce?</legend>
+              <legend id="game-legend">Which are uniform draws from the regex language?</legend>
               <div id="game-list" class="game-list"></div>
             </fieldset>
 

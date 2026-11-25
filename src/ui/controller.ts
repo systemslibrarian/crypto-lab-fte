@@ -965,8 +965,9 @@ function dealRound(): void {
     return;
   }
 
-  // Real unrankings at uniformly random indices — the same function the encoder
-  // uses, so these are exactly the strings FTE produces. Nothing is faked.
+  // Real unrankings at uniformly random indices. The encoder uses the same
+  // unranking function, but this deliberately separate experiment does not
+  // claim that the encoder's own outputs are uniformly distributed.
   const generated: string[] = [];
   const seen = new Set<string>();
   for (let guard = 0; generated.length < GAME_GENERATED && guard < 200; guard += 1) {
@@ -1005,7 +1006,7 @@ function dealRound(): void {
   setStatus(
     "game-status",
     "idle",
-    `${round.candidates.length} candidates, ${round.generatedCount} of them from the encoder. Tick the ones you think it made, then Reveal.`
+    `${round.candidates.length} candidates, ${round.generatedCount} of them uniform language draws. Tick those, then Reveal.`
   );
 }
 
@@ -1034,8 +1035,8 @@ function revealRound(): void {
     "ok",
     `${score.correct} of ${score.total} correct. ` +
       (missed === 0
-        ? "You caught every generated string — which is the point: a regex could not, and you could."
-        : `${missed} generated string${missed === 1 ? "" : "s"} passed as real. That is the gap between "a regex cannot tell" and "nobody can tell".`)
+        ? "You caught every uniform language draw — which is the point: a regex could not, and you could."
+        : `${missed} uniform language draw${missed === 1 ? "" : "s"} passed as real. That is the gap between "a regex cannot tell" and "nobody can tell".`)
   );
   ($("game-reveal") as HTMLButtonElement).disabled = true;
 }

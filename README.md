@@ -15,8 +15,9 @@ Ordinary encryption produces bytes that look like nothing. "Looks like nothing" 
 signature: a DPI middlebox that drops what it cannot classify, or a log pipeline that only
 accepts well-formed records, rejects high-entropy noise on sight. **Format-Transforming
 Encryption** (FTE) fixes the shape of the output without weakening the cipher underneath. You
-give it a regular expression; it emits ciphertext that the regular expression accepts, drawn
-uniformly from every string the expression accepts at that length.
+give it a regular expression; it emits ciphertext that the regular expression accepts. That
+format-membership guarantee is exact. It does **not** say that repeated encodes are distributed
+uniformly over every accepted string.
 
 The exact primitives on this page, all of them running in the browser tab:
 
@@ -97,12 +98,15 @@ only, never TAB or LF, matching the usual convention that dot does not cross a l
 
 ### Security model
 
-Within the FTE threat model the guarantee is exact: the output is a uniformly random member of
-`L ∩ Sigma^n`, so **no regular expression that accepts the language can distinguish it from a
-genuine member**. That is the whole of what is proved. It defeats a regex classifier. It defeats
-nothing else — not a human reader, not a digit-frequency test, not a model trained on real
-traffic. Dyer et al. say the same in the paper that introduced FTE: it targets regex-based DPI,
-not traffic analysis.
+Within the FTE threat model the exact guarantee is **membership**: every output is in
+`L ∩ Sigma^n`, so a classifier that only asks whether the chosen regex matches accepts it. That
+is the whole claim demonstrated here. It does not prove that the output distribution is uniform
+over the language. A simple support bound rules out that stronger statement for the base64 preset:
+with a fixed passphrase and message, its fresh 128-bit salt can select at most `2^128` outputs,
+while the length-64 language contains `64^64 = 2^384` strings. It defeats the compiled regex
+membership test. It defeats nothing else — not a human reader, not a digit-frequency test, not a
+model trained on real traffic. Section 3 of Dyer et al. states the membership guarantee: FTE
+ciphertexts are guaranteed to match the specified regex. It does not claim exact uniformity.
 
 **This is not production cryptography. It is a teaching demo.** There is no authentication
 anywhere in the pipeline, the salt and pattern and `n` must travel out of band, and the whole
@@ -165,11 +169,11 @@ A tour of the interactive panels, numbered as the page numbers them.
    than a sentence.
 7. **Honest limitations.** Three named failures of the construction, reproduced below — and all
    three are now demonstrations rather than prose.
-   *Uniform is not realistic*: **Spot the fake** deals four real unrankings against four realistic
-   decoys and asks you to pick the generated ones, then names the tell in each — an unassigned
+   *Format membership is not realistic traffic*: **Spot the fake** deals four uniform language
+   draws against four realistic decoys and asks you to pick the uniform draws, then names the tell in each — an unassigned
    area code, an N11 service code, a leading-zero exchange. On the hex and base64 presets it
-   declines to deal and says why: there is no such thing as a realistic random hex string, which
-   is exactly why those formats are the easy case and the phone number is the hard one.
+   declines to deal because there is no single defensible real-world comparison distribution;
+   inventing one would undermine the limitation the game is meant to teach.
    *Length leakage*: **what the wire sees** is the ladder an observer builds from a character
    count alone — message size, payload bits, the `n` the encoder picks, and which other message
    sizes are indistinguishable from it. The four presets are fixed-length and leak nothing;
@@ -240,7 +244,7 @@ Use this demo to explain, to a colleague or a class:
 **Do NOT use this to hide real traffic, real messages, or anything whose exposure matters.** It
 has no MAC, so any adversary can swap your stego string for a different member of the language
 and the receiver cannot tell; it leaks message length through `n`; it is a hand-rolled FF1 in
-TypeScript with no side-channel hardening; and the uniform output is trivially separable from
+TypeScript with no side-channel hardening; and the generated output is trivially separable from
 real traffic by anything smarter than a regular expression. If you need a real censorship-
 circumvention transport, use a maintained one. If you need format-preserving encryption in
 production, use a vetted FF1 implementation and read SP 800-38G Rev. 1 first.
@@ -306,12 +310,12 @@ either.
 
 ### The three named limitations, as the page states them
 
-**Uniform is not the same as realistic.** Format conformance defeats a *regex* classifier, and
-within that model the guarantee is exact. It defeats nothing else. A phone number drawn uniformly
-from `(000) 000-0000` through `(999) 999-9999` has no area-code structure, no exchange
-conventions, and a leading zero about a tenth of the time. A human glance, a digit-frequency
-test, or a model trained on real phone numbers separates it from the genuine article
-immediately.
+**Format membership is not realistic traffic.** The exact guarantee is that the output matches
+the chosen regex. It is not a guarantee that outputs are uniformly distributed over the whole
+language. Even a hypothetical uniform draw from `(000) 000-0000` through `(999) 999-9999` would
+have no area-code structure, no exchange conventions, and a leading zero about a tenth of the
+time. A human glance, a digit-frequency test, or a model trained on real phone numbers separates
+this lab's generated values from the genuine article immediately.
 
 **Length leakage.** `n` is fixed and public, so the stego string's length is a direct function of
 the message's length class — and the encoder *grows* `n` when a message will not fit, turning a
@@ -402,7 +406,7 @@ build-time secret; opening `dist/index.html` through any static server is enough
 
 ## Build & Verify
 
-`npm test` runs **166 tests across 15 files** (about 8 seconds; the bulk of it is PBKDF2, which is the point):
+`npm test` runs **168 tests across 16 files** (about 12 seconds; the bulk of it is PBKDF2, which is the point):
 
 | File | Tests | What it pins down |
 | --- | --- | --- |
@@ -421,6 +425,7 @@ build-time secret; opening `dist/index.html` through any static server is enough
 | `src/frag.test.ts` | 14 | The plan being **tight** — the claimed fragment count holds the blob and one fewer would not — across four capacities, three tag sizes and four message lengths; a 16-byte message with a 128-bit tag needing exactly 12 phone numbers; and tampering, reordering or dropping any single fragment failing the whole message |
 | `src/replay.test.ts` | 8 | Out-of-order arrivals accepted once and only once; anything past the window floor refused as too old; **a jump past the window emptying the bitmap** rather than wrapping stale bits into false freshness |
 | `src/share.test.ts` | 9 | Round-tripping regex metacharacters through the fragment, dropping unknown and oversized keys, surviving eleven hostile fragments without throwing, and refusing to write a URL containing key material — including a passphrase with a space, which an earlier `decodeURIComponent`-based check let through |
+| `src/ui/template.test.ts` | 1 | The student-facing lesson states exact regex membership without claiming exact uniformity over the language |
 
 The known-answer tests are the first two rows: `src/ff1.test.ts` for the cipher, `src/rank.test.ts`
 for the combinatorics.

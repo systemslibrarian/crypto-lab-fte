@@ -1,5 +1,5 @@
 /**
- * "Uniform is not the same as realistic", made playable.
+ * "Format membership is not realistic traffic", made playable.
  *
  * The first honest limitation on the page is the most important sentence on it,
  * and prose is a bad way to deliver it: a reader who has just watched the
@@ -7,10 +7,10 @@
  * mind to absorb "and yet a human would spot this instantly". So they get to
  * try, fail, and be told why.
  *
- * The generated candidates come from the real `unrank` path over the real count
- * table — not a mock, not a template with random digits. If the game were fed
- * plausible-looking fakes it would be teaching a lie about the very thing the
- * page exists to be honest about.
+ * The generated candidates are deliberately uniform draws from the real
+ * `unrank` path over the real count table — not outputs attributed to the
+ * encoder. This isolates the realism question without making a false claim
+ * about the encoder's output distribution.
  *
  * Realism is only defined where a corpus notion exists. North American phone
  * numbers have published structure (NANP), and zero-padded dotted quads have
@@ -21,7 +21,7 @@
 
 export interface Candidate {
   value: string;
-  /** True when this came out of the FTE unranking. */
+  /** True when this is a uniform draw passed through the FTE unranking. */
   generated: boolean;
   /** Why it is or is not realistic — shown only after the reveal. */
   tell: string;
@@ -92,10 +92,9 @@ export function realismFor(presetId: string): { make: (rng: Rng) => string } | {
   if (presetId === "hex" || presetId === "base64") {
     return {
       why:
-        "There is no such thing as a realistic random hex or base64 blob — the genuine article is " +
-        "uniform too. That is exactly why these two formats are the easy case for FTE, and why the " +
-        "phone number is the hard one: the more structure a human expects, the more a uniform draw " +
-        "gives itself away."
+        "There is no single defensible real-world distribution for a random hex or base64 blob, so " +
+        "this game declines to invent one. Phone numbers are the useful comparison because their " +
+        "published structure lets a uniform language draw give itself away."
     };
   }
   return {

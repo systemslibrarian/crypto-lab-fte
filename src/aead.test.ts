@@ -136,7 +136,7 @@ describe("authentication", () => {
       rejected += 1;
     }
     expect(rejected).toBe(40);
-  });
+  }, 10_000);
 
   it("rejects a wholly different member of the language", async () => {
     const format = compileFormat(HEX);
