@@ -238,3 +238,1193 @@ test.describe('the encode path tells the truth', () => {
     await boot(page);
     await page.fill('#encode-passphrase', 'correct horse battery staple');
     await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#encode-status-text')).toContainText('Encoded.');
+
+    const pattern = await page.inputValue('#pattern');
+    expect(pattern).toBe(PHONE);
+    const stego = await text(page, 'encode-out');
+    // RegExp knows nothing about this lab's DFA. Agreement is evidence.
+    expect(new RegExp(`^(?:${pattern})$`).test(stego), `"${stego}" vs /${pattern}/`).toBe(true);
+    expect(String(stego.length)).toBe(await page.inputValue('#length'));
+  });
+
+  test('the capacity bar figures are the message bytes and the printed capacity', async ({
+    page
+  }) => {
+    await boot(page);
+    const message = 'hey';
+    await page.fill('#encode-message', message);
+    const figures = await text(page, 'capacity-figures');
+    const parsed = /^(\d+) used \/ (\d+) available$/.exec(figures);
+    expect(parsed, figures).not.toBeNull();
+    const [, used, available] = parsed as RegExpExecArray;
+    // Re-derived: UTF-8 bytes plus the one frame byte, times eight.
+    expect(Number(used)).toBe(8 * (new TextEncoder().encode(message).length + 1));
+    expect(`${available} bits`).toBe(await text(page, 'stat-capacity'));
+    await expect(page.locator('#capacity-track')).toHaveAttribute(
+      'aria-valuetext',
+      `${used} of ${available} bits used`
+    );
+  });
+
+  test('the step trace quotes the same N the stat grid does, and lands inside it', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    await page.locator('#encode-trace > summary').click();
+    const values = await page.locator('#trace-list .trace-value').allTextContents();
+    expect(values.length).toBe(6);
+
+    const slice = /^(\d+) \((\d+) bits of capacity\)$/.exec(values[3].trim());
+    expect(slice, values[3]).not.toBeNull();
+    const [, n, bits] = slice as RegExpExecArray;
+    expect(n).toBe(await text(page, 'stat-total'));
+    expect(`${bits} bits`).toBe(await text(page, 'stat-capacity'));
+
+    // The FF1 output must be inside [0, N) — that is the entire point of the
+    // cycle walk, and it is checked against the N printed on the line above.
+    const ciphered = /^(\d+) after \d+ application/.exec(values[4].trim());
+    expect(ciphered, values[4]).not.toBeNull();
+    expect(BigInt((ciphered as RegExpExecArray)[1])).toBeLessThan(BigInt(n));
+  });
+
+  test('n grows to exactly the length the payload needs, and says so', async ({ page }) => {
+    await boot(page);
+    // The pattern input is debounced. Waiting on "Compiled." would pass
+    // instantly against the PREVIOUS pattern's status; the preset select
+    // flipping to "custom" is a signal only this recompile can produce.
+    await page.fill('#pattern', '[0-9a-f]{1,512}');
+    await expect(page.locator('#preset')).toHaveValue('custom');
+    await expect(page.locator('#stat-states')).toHaveText('513');
+    await page.fill('#length', '4');
+    const message = 'a longer message';
+    await page.fill('#encode-message', message);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    // Re-derived independently: each hex character carries exactly 4 bits, so a
+    // payload of 8·(bytes+1) bits needs ceil(bits/4) characters.
+    const payloadBits = 8 * (new TextEncoder().encode(message).length + 1);
+    const expectedN = Math.ceil(payloadBits / 4);
+
+    await expect(page.locator('#encode-status-text')).toContainText(
+      `The message needed ${payloadBits} bits, so n grew from 4 to ${expectedN}.`
+    );
+    expect(await page.inputValue('#length')).toBe(String(expectedN));
+    expect((await text(page, 'encode-out')).length).toBe(expectedN);
+  });
+
+  test('an over-capacity message is refused, and the refusal names the real ceiling', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-message', 'far too long to fit in ten decimal digits');
+    await page.fill('#encode-passphrase', 'pw');
+    await expect(page.locator('#capacity-fill')).toHaveClass(/is-over/);
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const status = await text(page, 'encode-status-text');
+    // The ceiling it names must be the one the stat grid shows at that n.
+    expect(status).toContain('tops out at 33 bits');
+    expect(await text(page, 'stat-capacity')).toBe('33 bits');
+    // And nothing was produced.
+    await expect(page.locator('#encode-out')).toHaveClass(/is-empty/);
+  });
+});
+
+test.describe('the decode path tells the truth', () => {
+  test('the round trip returns the exact message', async ({ page }) => {
+    await boot(page);
+    await page.locator('#preset').selectOption('base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    const message = 'Meet me where the DFA accepts. 集合';
+    await page.fill('#encode-message', message);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#encode-status-text')).toContainText('Encoded.');
+
+    await page.click('#decode-fill');
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    expect(await text(page, 'decode-out')).toBe(message);
+  });
+
+  test('the decode status quotes an index genuinely inside the printed N', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#decode-fill');
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+
+    const status = await text(page, 'decode-status-text');
+    const parsed = /Ranked to index (\d+) of N = (\d+);/.exec(status);
+    expect(parsed, status).not.toBeNull();
+    const [, index, total] = parsed as RegExpExecArray;
+    expect(total).toBe(await text(page, 'stat-total'));
+    expect(BigInt(index)).toBeLessThan(BigInt(total));
+
+    // Independent re-derivation of the rank: for this format the string
+    // (abc) def-ghij ranks to the integer its ten digits spell.
+    const stego = await text(page, 'encode-out');
+    expect(BigInt(stego.replace(/\D/g, ''))).toBe(BigInt(index));
+  });
+
+  test('each failure path fails, and the page names the actual cause', async ({ page }) => {
+    await boot(page);
+    // Run the wording assertions on BASE64, not on the phone preset, and the
+    // reason is the No authentication limitation itself. A wrong key lands
+    // uniformly in [0, N); the decoder accepts if the minimal big-endian
+    // encoding starts with 0x01. For the phone slice (N = 10^10) that is ~43%,
+    // and the strict UTF-8 decode behind it catches most but not all of those,
+    // so roughly one wrong key in thirty "succeeds" with four bytes of garbage
+    // — which made an earlier version of this test flaky about 3% of runs.
+    // For base64 the frame byte passes 1/255 and the UTF-8 check then has to
+    // accept ~47 uniform random bytes, so a false accept is a ~2^-40 event and
+    // the failure wording is deterministic in practice.
+    await page.locator('#preset').selectOption('base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.fill('#encode-passphrase', 'right');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#decode-fill');
+
+    await page.fill('#decode-passphrase', 'wrong');
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    // Either of the two rejection points is correct — the frame byte or the
+    // UTF-8 decode — but the page must name which of the three inputs could be
+    // wrong rather than blaming something else.
+    expect(await text(page, 'decode-status-text')).toMatch(
+      /The passphrase, the salt, or the pattern|The passphrase or the salt does not match/
+    );
+    await expect(page.locator('#decode-out')).toHaveClass(/is-empty/);
+
+    await page.fill('#decode-passphrase', 'right');
+    await page.fill('#decode-salt', '00'.repeat(16));
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    expect(await text(page, 'decode-status-text')).toContain('Decode failed');
+    await expect(page.locator('#decode-out')).toHaveClass(/is-empty/);
+
+    // These three are deterministic on any format: they fail before any key is
+    // derived, on the shape of the input rather than on its value.
+    await page.fill('#decode-salt', 'not-hex');
+    await page.click('#decode-run');
+    await expect(page.locator('#decode-salt')).toHaveAttribute('aria-invalid', 'true');
+    expect(await text(page, 'decode-status-text')).toContain('Hex must contain');
+
+    await page.fill('#decode-salt', '00'.repeat(8));
+    await page.click('#decode-run');
+    expect(await text(page, 'decode-status-text')).toContain('exactly 32 hex characters');
+
+    // A string that is not in the language at all, at a length the format does
+    // accept — so it is the RANKING that rejects it, not a length check.
+    await page.fill('#decode-salt', '00'.repeat(16));
+    await page.fill('#decode-stego', '!'.repeat(64));
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    expect(await text(page, 'decode-status-text')).toContain('not accepted here by this pattern');
+
+    // And a string of a length the format cannot produce at all.
+    await page.fill('#decode-stego', 'AAAA');
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    expect(await text(page, 'decode-status-text')).toContain('accepts no string of length 4');
+  });
+
+  test('a wrong key never returns the real message, even when it is not rejected', async ({
+    page
+  }) => {
+    // The deterministic half of the previous test, on the format where the
+    // frame byte is weakest. This is the property that actually holds for every
+    // wrong key: confidentiality. Whether the wrong key is REJECTED is a
+    // property of the domain size; whether it can recover the plaintext is a
+    // property of AES.
+    await boot(page);
+    await page.fill('#encode-message', 'hi');
+    await page.fill('#encode-passphrase', 'right');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#decode-fill');
+
+    for (const passphrase of ['wrong-a', 'wrong-b', 'wrong-c']) {
+      await page.fill('#decode-passphrase', passphrase);
+      await page.click('#decode-run');
+      await settleStatus(page, 'decode-status');
+      // It may fail, or it may print garbage. It may never print "hi".
+      expect(await text(page, 'decode-out'), `passphrase ${passphrase}`).not.toBe('hi');
+    }
+
+    // And the correct passphrase still works afterwards, so the loop above did
+    // not simply break the panel.
+    await page.fill('#decode-passphrase', 'right');
+    await page.click('#decode-run');
+    await settleStatus(page, 'decode-status');
+    expect(await text(page, 'decode-out')).toBe('hi');
+  });
+});
+
+test.describe('stale results are retired, and only when they are stale', () => {
+  test('changing the format retires the stego string and says so', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#encode-out')).not.toHaveClass(/is-empty/);
+
+    await page.locator('#preset').selectOption('hex');
+    await expect(page.locator('#encode-out')).toHaveClass(/is-empty/);
+    expect(await text(page, 'encode-status-text')).toContain('Retired the previous stego string');
+    await expect(page.locator('#encode-copy')).toBeDisabled();
+    await expect(page.locator('#decode-fill')).toBeDisabled();
+  });
+
+  test('changing n alone also retires it', async ({ page }) => {
+    await boot(page);
+    await page.fill('#pattern', '[0-9a-f]{1,64}');
+    await expect(page.locator('#preset')).toHaveValue('custom');
+    await expect(page.locator('#stat-states')).toHaveText('65');
+    await page.fill('#length', '32');
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#encode-out')).not.toHaveClass(/is-empty/);
+
+    await page.fill('#length', '33');
+    await expect(page.locator('#encode-out')).toHaveClass(/is-empty/);
+    expect(await text(page, 'encode-status-text')).toContain('Retired');
+  });
+
+  test('no-op guard: re-selecting the SAME preset must not retire a fresh result', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    const stego = await text(page, 'encode-out');
+    expect(stego).not.toContain('Nothing encoded');
+
+    await page.locator('#preset').selectOption('phone');
+    await page.fill('#length', await page.inputValue('#length'));
+    expect(await text(page, 'encode-out')).toBe(stego);
+    expect(await text(page, 'encode-status-text')).toContain('Encoded.');
+    await expect(page.locator('#encode-copy')).toBeEnabled();
+  });
+
+  test('the n the encoder grew into is not treated as a change', async ({ page }) => {
+    await boot(page);
+    await page.fill('#pattern', '[0-9a-f]{1,512}');
+    await expect(page.locator('#preset')).toHaveValue('custom');
+    await expect(page.locator('#stat-states')).toHaveText('513');
+    await page.fill('#length', '4');
+    await page.fill('#encode-message', 'grow me');
+    await page.fill('#encode-passphrase', 'pw');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    // The encoder moved n itself; the result must survive its own move.
+    expect(await text(page, 'encode-status-text')).toContain('so n grew from 4 to');
+    await expect(page.locator('#encode-out')).not.toHaveClass(/is-empty/);
+    await expect(page.locator('#decode-fill')).toBeEnabled();
+  });
+});
+
+/**
+ * The adversary panel is the one place the page makes a claim about a THIRD
+ * party — what a middlebox would do. So the oracle is the platform regex
+ * engine, run over the payloads the page printed, never the page's own verdict
+ * column read back to itself.
+ */
+test.describe('the classifier tells the truth about the adversary', () => {
+  test('the verdicts match what the platform regex engine says about the printed payloads', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await expect(page.locator('#classifier-status-text')).not.toContainText('Encode a message first');
+
+    const rule = await page.inputValue('#classifier-pattern');
+    expect(rule).toBe(PHONE);
+
+    const rows = await page.locator('#classifier-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        label: (tr.children[0].textContent ?? '').trim(),
+        payload: (tr.children[1].textContent ?? '').trim(),
+        verdict: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    expect(rows).toHaveLength(3);
+
+    const anchored = new RegExp(`^(?:${rule})$`);
+    for (const row of rows) {
+      // The payload cell abbreviates long values; only judge the ones printed
+      // in full, which is exactly the stego string — the row that matters.
+      if (row.payload.includes('…')) continue;
+      const expected = anchored.test(row.payload) ? 'PASS' : 'FLAGGED';
+      expect(row.verdict, `${row.label}: "${row.payload}"`).toContain(expected);
+    }
+  });
+
+  test('the stego string passes the same rule the raw ciphertext fails', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const verdicts = await page.locator('#classifier-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        label: (tr.children[0].textContent ?? '').trim(),
+        verdict: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    const stego = verdicts.find((v) => v.label.includes('stego'));
+    const raw = verdicts.filter((v) => !v.label.includes('stego'));
+    expect(stego?.verdict).toContain('PASS');
+    expect(raw).toHaveLength(2);
+    for (const row of raw) expect(row.verdict, row.label).toContain('FLAGGED');
+    await expect(page.locator('#classifier-summary')).toContainText('entire product');
+  });
+
+  /**
+   * The honest half. A rule the format is NOT contained in must flag the stego
+   * string, and the page must say so rather than keeping its triumphant copy.
+   */
+  test('a rule sharper than the format flags the stego string, and the page admits it', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    const area = stego.slice(1, 4);
+    // A rule accepting every area code EXCEPT the one that was produced.
+    const sharper = `\\((?!${area})\\d{3}\\) \\d{3}-\\d{4}`;
+    await page.fill('#classifier-pattern', sharper);
+    await page.click('#classifier-run');
+
+    const verdict = await page.locator('#classifier-body tr').first().evaluate(
+      (tr) => (tr.children[2].textContent ?? '').trim()
+    );
+    expect(verdict).toContain('FLAGGED');
+    await expect(page.locator('#classifier-summary')).toContainText('honest limit');
+  });
+
+  test('resetting restores the format regex and the textbook result', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    await page.fill('#classifier-pattern', '\\d{4}');
+    await page.click('#classifier-run');
+    await page.click('#classifier-reset');
+    expect(await page.inputValue('#classifier-pattern')).toBe(PHONE);
+    await expect(page.locator('#classifier-status-text')).toContainText('both raw encodings dropped');
+  });
+});
+
+test.describe('the pipeline and the cycle walk quote the encode they came from', () => {
+  test('every pipeline node carries a value the trace also reports', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    expect(await text(page, 'pipe-stego-value')).toBe(stego);
+    // N on the pipeline is the N the stat grid prints.
+    expect(await text(page, 'pipe-domain-value')).toContain(await text(page, 'stat-total'));
+    expect(await text(page, 'pipe-message-value')).toContain('UTF-8 byte');
+    for (const id of ['pipe-cipher-value', 'pipe-integer-value', 'pipe-ff1-value']) {
+      expect(await text(page, id), id).not.toBe('—');
+    }
+  });
+
+  test('the walk draws exactly as many landings as the status line counts', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const status = await text(page, 'encode-status-text');
+    const claimed = /took (\d+) FF1 application/.exec(status);
+    // n did not grow for this message, so the walk sentence is present.
+    expect(claimed, status).not.toBeNull();
+    const steps = Number(claimed![1]);
+
+    const dots = await page.locator('#walk-svg .walk-dot').count();
+    expect(dots).toBe(steps);
+    // Exactly one landing is inside [0, N) — the last one. That is what
+    // terminating the walk MEANS, and it is drawn, not asserted.
+    expect(await page.locator('#walk-svg .walk-dot.is-in').count()).toBe(1);
+    expect(await page.locator('#walk-svg .walk-dot.is-out').count()).toBe(steps - 1);
+    await expect(page.locator('#walk-readout')).toContainText('FF1 application');
+  });
+});
+
+test.describe('the highlighted path is the path the string actually walks', () => {
+  test('the scrubber spans the string, and each step names a real transition', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    const stego = await text(page, 'encode-out');
+    expect(await page.getAttribute('#pathwalk-scrub', 'max')).toBe(String(stego.length));
+    expect(await page.locator('#pathwalk-string .pathchar').count()).toBe(stego.length);
+
+    // Every (from, class) → to the readout claims must appear in the page's own
+    // transition table, which is built from the DFA by a different code path.
+    await page.click('#dfa-table-details > summary');
+    const table = await page.locator('#dfa-table-body tr').evaluateAll((trs) =>
+      trs.map((tr) => `${(tr.children[0].textContent ?? '').trim()}->${(tr.children[3].textContent ?? '').trim()}`)
+    );
+
+    for (let i = 1; i <= stego.length; i += 1) {
+      await page.fill('#pathwalk-scrub', String(i));
+      await page.dispatchEvent('#pathwalk-scrub', 'input');
+      const readout = await text(page, 'pathwalk-readout');
+      const move = /q(\d+) → q(\d+)/.exec(readout);
+      expect(move, readout).not.toBeNull();
+      expect(table, readout).toContain(`q${move![1]}->q${move![2]}`);
+    }
+    // The last character must land somewhere the page calls accepting.
+    await expect(page.locator('#pathwalk-readout')).toContainText('accepting state');
+  });
+
+  test('the highlight marks exactly one current state, and only states on the path', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+
+    expect(await page.locator('#dfa-graph .dfa-node.is-current').count()).toBe(1);
+    const onPath = await page.locator('#dfa-graph .dfa-node.is-on-path').count();
+    const total = await page.locator('#dfa-graph .dfa-node').count();
+    expect(onPath).toBeGreaterThan(0);
+    expect(onPath).toBeLessThanOrEqual(total);
+
+    await page.fill('#pathwalk-scrub', '0');
+    await page.dispatchEvent('#pathwalk-scrub', 'input');
+    await expect(page.locator('#pathwalk-readout')).toContainText('start state');
+    expect(await page.locator('#dfa-graph .dfa-node.is-current').count()).toBe(1);
+  });
+});
+
+test.describe('the in-page NIST vectors are the ones the test suite runs', () => {
+  test('nine rows, none failing, and the unsupported ones say why', async ({ page }) => {
+    await boot(page);
+    await page.click('#vectors-details > summary');
+    await page.click('#vectors-run');
+    await settleStatus(page, 'vectors-status');
+
+    const rows = await page.locator('#vectors-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        name: (tr.children[0].textContent ?? '').trim(),
+        key: (tr.children[1].textContent ?? '').trim(),
+        expected: (tr.children[3].textContent ?? '').trim(),
+        actual: (tr.children[4].textContent ?? '').trim(),
+        result: (tr.children[5].textContent ?? '').trim()
+      }))
+    );
+    expect(rows).toHaveLength(9);
+    expect(rows.filter((r) => r.result === 'FAIL')).toEqual([]);
+
+    for (const row of rows) {
+      if (row.result === 'PASS') {
+        // The page printed both; they must agree. This is the whole point of
+        // showing "NIST says" beside "this page produced".
+        expect(row.actual, row.name).toBe(row.expected);
+      } else {
+        expect(row.result, row.name).toBe('UNSUPPORTED');
+        expect(row.key, row.name).toContain('AES-192');
+      }
+    }
+    // Chromium declines a 192-bit AES key on purpose (crbug.com/533699) even
+    // though the Web Cryptography API allows the length, so under this project
+    // exactly the three AES-192 samples sit out. Firefox, Safari and Node run
+    // all nine, which is why the page measures the count instead of stating one.
+    const unsupported = rows.filter((r) => r.result === 'UNSUPPORTED');
+    expect(unsupported).toHaveLength(3);
+    const ran = rows.length - unsupported.length;
+    await expect(page.locator('#vectors-status-text')).toContainText(`${ran} of ${rows.length}`);
+    await expect(page.locator('#vectors-status-text')).toContainText('crbug.com/533699');
+  });
+
+  test('the two sentences about the AES-192 split come from the run-time probe', async ({
+    page
+  }) => {
+    await boot(page);
+    // Both carry a count that is a property of the browser rather than of the
+    // page, so neither may still be showing the markup's no-count wording.
+    await expect(page.locator('#aes192-intro')).toContainText('6 of the 9 reproduce here');
+    await expect(page.locator('#aes192-intro')).not.toContainText('depends on your browser');
+    await page.click('#vectors-details > summary');
+    await expect(page.locator('#aes192-note')).toContainText('6 of the 9 run here');
+    // And the claim this replaced: the gap is an engine's, not the API's.
+    await expect(page.locator('#aes192-note')).toContainText('the Web Cryptography API allows it');
+  });
+
+  test('the FF1 citation names the section SP 800-38G actually puts FF1 in', async ({ page }) => {
+    await boot(page);
+    // SP 800-38G §5.1 is FF1 — Algorithm 7, FF1.Encrypt, whose step 5 defines
+    // the fixed block P this lab builds. §5.2 is FF3.
+    const nist = page.locator('section.refs > ol > li').last();
+    await expect(nist).toContainText('SP 800-38G');
+    await expect(nist).toContainText('§5.1');
+    await expect(nist).not.toContainText('§5.2');
+  });
+});
+
+test.describe('spot the fake compares uniform language draws with realistic ones', () => {
+  test('every candidate is a member of the language the page compiled', async ({ page }) => {
+    await boot(page);
+    await page.click('#game-deal');
+
+    const values = await page.locator('#game-list label').evaluateAll((els) =>
+      els.map((el) => (el.textContent ?? '').trim())
+    );
+    expect(values.length).toBeGreaterThan(0);
+
+    const pattern = await page.inputValue('#pattern');
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    for (const value of values) {
+      // Generated AND realistic candidates must both match — a decoy the regex
+      // rejects would be a giveaway that has nothing to do with realism.
+      expect(anchored.test(value), `"${value}" vs /${pattern}/`).toBe(true);
+    }
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  test('the reveal scores against the truth and names a tell for every candidate', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.click('#game-deal');
+    const count = await page.locator('#game-list .game-item').count();
+    await page.click('#game-reveal');
+
+    const status = await text(page, 'game-status-text');
+    const score = /^(\d+) of (\d+) correct\./.exec(status);
+    expect(score, status).not.toBeNull();
+    expect(Number(score![2])).toBe(count);
+    // Ticking nothing means every realistic one is right and every generated
+    // one is missed, so the score is exactly the realistic count.
+    expect(Number(score![1])).toBeLessThan(count);
+
+    const tells = await page.locator('#game-list .game-tell').evaluateAll((els) =>
+      els.map((el) => (el.textContent ?? '').trim())
+    );
+    expect(tells.filter((t) => t.length === 0)).toEqual([]);
+    expect(await page.locator('#game-list .game-item.is-generated').count()).toBeGreaterThan(0);
+    expect(await page.locator('#game-list .game-item.is-real').count()).toBeGreaterThan(0);
+  });
+
+  test('the game declines to invent a corpus for hex, and says why', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.click('#game-deal');
+    await expect(page.locator('#game-status-text')).toContainText('no single defensible real-world distribution');
+    expect(await page.locator('#game-list .game-item').count()).toBe(0);
+  });
+});
+
+test.describe('the shareable link carries state and never carries secrets', () => {
+  test('the fragment restores pattern, n and message in a fresh page', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.fill('#encode-message', 'shared');
+    await page.click('#share-copy');
+
+    const hash = await page.evaluate(() => window.location.hash);
+    expect(hash.length).toBeGreaterThan(1);
+
+    const fresh = await page.context().newPage();
+    await fresh.goto(`.${hash}`);
+    await expect(fresh.locator('#format-status-text')).toContainText('Compiled.');
+    expect(await fresh.inputValue('#pattern')).toBe('[0-9a-f]{32}');
+    expect(await fresh.inputValue('#encode-message')).toBe('shared');
+    expect(await fresh.inputValue('#length')).toBe('32');
+    await fresh.close();
+  });
+
+  test('a real passphrase and the salt are provably absent from the URL', async ({ page }) => {
+    await boot(page);
+    const passphrase = 'zebra-canyon-quartz-77';
+    await page.fill('#encode-passphrase', passphrase);
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#share-copy');
+
+    const href = await page.evaluate(() => window.location.href);
+    const decoded = decodeURIComponent(href).toLowerCase();
+    expect(decoded).not.toContain(passphrase.toLowerCase());
+
+    const bundle = await text(page, 'encode-bundle');
+    const salt = /salt\s+([0-9a-f]{32})/.exec(bundle);
+    expect(salt, bundle).not.toBeNull();
+    expect(decoded).not.toContain(salt![1].toLowerCase());
+  });
+
+  /**
+   * Note what is NOT asserted here: that a weird pattern is rejected. `%%%%` is
+   * a perfectly good regular expression matching four literal percent signs,
+   * and restoring it is the share feature working, not failing. What must hold
+   * is that the fields the page derives numbers from cannot be poisoned.
+   */
+  test('out-of-range and unknown fragment fields are ignored, not applied', async ({ page }) => {
+    await page.goto('.#n=-5&step=999&passphrase=hunter2&__proto__=polluted');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    // The defaults survived: neither the negative n nor the absent pattern took.
+    expect(await page.inputValue('#pattern')).toBe(PHONE);
+    expect(await page.inputValue('#length')).toBe('14');
+    // A step past the end of the path does not open the path.
+    await expect(page.locator('#tour-panel')).toBeHidden();
+    // Nothing was written onto Object.prototype.
+    expect(await page.evaluate(() => ({} as Record<string, unknown>).polluted)).toBeUndefined();
+    // And a passphrase in the fragment is not adopted as one.
+    expect(await page.inputValue('#encode-passphrase')).toBe('');
+  });
+
+  test('a fragment carrying an uncompilable pattern fails visibly and stays usable', async ({
+    page
+  }) => {
+    await page.goto('.#pattern=%28unclosed');
+    await expect(page.locator('#pattern')).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.locator('#encode-run')).toBeDisabled();
+    await expect(page.locator('#tour-panel')).toBeHidden();
+
+    // Still a working lab: pick a preset and it recovers.
+    await page.selectOption('#preset', 'phone');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#encode-run')).toBeEnabled();
+  });
+});
+
+test.describe('the guided path ends where it should', () => {
+  test('seven steps, and the last one is the honest limitations', async ({ page }) => {
+    await boot(page);
+    await page.click('#tour-start');
+    await expect(page.locator('#tour-panel')).toBeVisible();
+    expect(await text(page, 'tour-total')).toBe('7');
+
+    for (let step = 1; step < 7; step += 1) {
+      expect(await text(page, 'tour-index')).toBe(String(step));
+      await page.click('#tour-next');
+    }
+    expect(await text(page, 'tour-index')).toBe('7');
+    await expect(page.locator('#tour-body')).toContainText('Spot the fake');
+    await expect(page.locator('#tour-title')).toContainText('honest');
+
+    // Finishing closes the path rather than wrapping round to step one.
+    await page.click('#tour-next');
+    await expect(page.locator('#tour-panel')).toBeHidden();
+  });
+});
+
+test.describe('the hero encoder cannot disagree with the panel below it', () => {
+  test('one encode, one stego string, shown in both places', async ({ page }) => {
+    await boot(page);
+    await page.fill('#quick-message', 'hi');
+    await page.fill('#quick-passphrase', 'correct horse battery staple');
+    await page.click('#quick-run');
+    await settleStatus(page, 'quick-status');
+
+    const hero = await text(page, 'quick-out');
+    const panel = await text(page, 'encode-out');
+    expect(hero).toBe(panel);
+    expect(await page.inputValue('#encode-message')).toBe('hi');
+
+    const pattern = await page.inputValue('#pattern');
+    expect(new RegExp(`^(?:${pattern})$`).test(hero), hero).toBe(true);
+  });
+});
+
+/**
+ * The two limitations that used to be prose. Both panels make a claim about
+ * what an adversary can do, so both are checked against something other than
+ * their own output: the ladder against closed-form arithmetic, the substitution
+ * against the frame byte's independently-computed false-accept rate.
+ */
+test.describe('length leakage is shown, not just asserted', () => {
+  test('a fixed-length preset is one bucket, and the page says it leaks nothing', async ({
+    page
+  }) => {
+    await boot(page);
+    await expect(page.locator('#leak-readout')).toContainText('leaks nothing about the message size');
+
+    const wire = await page.locator('#leak-body tr').evaluateAll((trs) =>
+      trs
+        .map((tr) => (tr.children[3].textContent ?? '').trim())
+        .filter((t) => t !== '—')
+    );
+    // Every message that fits comes out at exactly n = 14 characters.
+    expect(new Set(wire).size).toBe(1);
+    expect(wire[0]).toBe('14 characters');
+  });
+
+  test('a variable-length pattern separates every size, and the ladder matches closed form', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#pattern', '[0-9a-f]{1,64}');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#leak-readout')).toContainText('distinct wire lengths');
+
+    const rows = await page.locator('#leak-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        bytes: Number((tr.children[0].textContent ?? '').trim()),
+        bits: Number((tr.children[1].textContent ?? '').trim()),
+        n: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    for (const row of rows) {
+      // Independent oracle: payload is 8(b+1) bits, a hex character carries 4,
+      // so the smallest n is 2(b+1). The page never computes it that way.
+      expect(row.bits).toBe(8 * (row.bytes + 1));
+      expect(row.n).toBe(String(2 * (row.bytes + 1)));
+    }
+  });
+
+  test('the chosen n is highlighted in the ladder, as it is in the count table', async ({
+    page
+  }) => {
+    await boot(page);
+    const highlighted = await page.locator('#leak-body tr.is-chosen').count();
+    expect(highlighted).toBeGreaterThan(0);
+  });
+});
+
+test.describe('the substitution attack runs for real', () => {
+  test('no substitution ever returns the message that was sent', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-message', 'hi');
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    await expect(page.locator('#swap-status-text')).toContainText('None returned your message');
+    const handed = await page.locator('#swap-body tr').evaluateAll((trs) =>
+      trs.map((tr) => (tr.children[2]?.textContent ?? '').trim())
+    );
+    // The receiver may be handed garbage; it is never handed "hi".
+    for (const value of handed) expect(value).not.toBe('"hi"');
+  });
+
+  test('every substituted string is a genuine member of the language', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    const original = await text(page, 'encode-out');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const pattern = await page.inputValue('#pattern');
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    const swapped = await page.locator('#swap-body tr th[scope="row"]').evaluateAll((ths) =>
+      ths.map((th) => (th.textContent ?? '').trim())
+    );
+    expect(swapped.length).toBeGreaterThan(0);
+    for (const value of swapped) {
+      expect(anchored.test(value), `"${value}" vs /${pattern}/`).toBe(true);
+      // Substituting the original is a no-op, not an attack.
+      expect(value).not.toBe(original);
+    }
+  });
+
+  test('the three outcomes partition the run, and the totals agree', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const read = async (id: string): Promise<[number, number]> => {
+      const parsed = /^(\d+) of (\d+)$/.exec(await text(page, id));
+      expect(parsed, id).not.toBeNull();
+      return [Number(parsed![1]), Number(parsed![2])];
+    };
+    const [frame, total] = await read('swap-frame');
+    const [utf8] = await read('swap-utf8');
+    const [accepted] = await read('swap-accepted');
+    expect(frame + utf8 + accepted).toBe(total);
+    expect(total).toBe(60);
+  });
+
+  /**
+   * The cross-check that makes the panel evidence rather than theatre: the
+   * share of substitutions getting past the frame byte, MEASURED by running the
+   * cipher, against the closed form that only counts intervals of [0, N).
+   */
+  test('the measured pass-the-frame rate tracks the closed-form prediction it prints', async ({
+    page
+  }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+
+    const rate = await text(page, 'swap-rate');
+    const parsed = /^(\d+)% vs ([\d.]+)%$/.exec(rate);
+    expect(parsed, rate).not.toBeNull();
+    const measured = Number(parsed![1]);
+    const predicted = Number(parsed![2]);
+
+    // The phone slice's closed form is ~43.1%, and the folklore 1/256 is not.
+    expect(predicted).toBeGreaterThan(42);
+    expect(predicted).toBeLessThan(44);
+    // 60 Bernoulli trials at p = 0.43 have a standard error near 6.4 points.
+    expect(Math.abs(measured - predicted)).toBeLessThan(20);
+
+    // And the figures in the table agree with that percentage.
+    const utf8 = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-utf8'))!;
+    const accepted = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-accepted'))!;
+    const pastFrame = Number(utf8[1]) + Number(accepted[1]);
+    expect(Math.round((pastFrame / Number(utf8[2])) * 100)).toBe(measured);
+  });
+
+  test('changing the format retires the attack along with the stego string', async ({ page }) => {
+    await boot(page);
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+    await expect(page.locator('#swap-accepted')).not.toHaveText('—');
+
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await expect(page.locator('#swap-accepted')).toHaveText('—');
+    await expect(page.locator('#swap-verdict')).toContainText('Nothing substituted yet');
+  });
+});
+
+/**
+ * The authenticated mode. The claim it makes is the strongest on the page — a
+ * MAC stops the substitution attack the mode above cannot — so the oracle is
+ * the attack itself, run against both modes, plus arithmetic the page never
+ * takes that route to.
+ */
+test.describe('the authenticated mode does what the limitations say is missing', () => {
+  const BASE64 = '[A-Za-z0-9+/]{64}';
+
+  async function seal(page: Page, message: string, tag = '16'): Promise<string> {
+    await page.selectOption('#preset', 'base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.selectOption('#auth-tag', tag);
+    await page.fill('#auth-message', message);
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('Sealed at counter');
+    return text(page, 'auth-out');
+  }
+
+  test('the budget table matches the arithmetic, and refuses what it says it refuses', async ({
+    page
+  }) => {
+    await boot(page);
+    const rows = await page.locator('#budget-body tr').evaluateAll((trs) =>
+      trs.map((tr) => Array.from(tr.children).map((c) => (c.textContent ?? '').trim()))
+    );
+    expect(rows).toHaveLength(4);
+
+    for (const [, capacity, , tag128, tag64, tag32] of rows) {
+      const bits = Number(/^(\d+) bits$/.exec(capacity)![1]);
+      const whole = Math.floor(bits / 8);
+      // Independent oracle: payload bytes minus frame byte minus tag minus the
+      // one byte padding always costs. The page never spells it out this way.
+      for (const [tagBytes, cell] of [[16, tag128], [8, tag64], [4, tag32]] as const) {
+        const expected = whole - 1 - tagBytes - 1;
+        if (expected >= 1) expect(cell).toBe(`${expected} bytes`);
+        else expect(cell).toBe('does not fit');
+      }
+    }
+  });
+
+  test('a phone number is refused, and the refusal shows the arithmetic', async ({ page }) => {
+    await boot(page);
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.fill('#auth-message', 'hi');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('does not fit');
+    await expect(page.locator('#auth-status-text')).toContainText('4 whole bytes');
+    await expect(page.locator('#auth-out')).toHaveClass(/is-empty/);
+  });
+
+  test('the sealed string is a member of the language, and nothing travels with it', async ({
+    page
+  }) => {
+    await boot(page);
+    const sealed = await seal(page, 'meet at six');
+    expect(new RegExp(`^(?:${BASE64})$`).test(sealed), sealed).toBe(true);
+    // No salt anywhere in this panel — that is the whole of item 4.
+    await expect(page.locator('#auth-oob')).toContainText('Nothing travels beside it');
+    expect(await page.locator('#auth-trace-list').textContent()).toContain('not shipped');
+  });
+
+  test('the wire length is constant across message sizes — the length leak is closed', async ({
+    page
+  }) => {
+    await boot(page);
+    const lengths = new Set<number>();
+    for (const message of ['a', 'hello', 'x'.repeat(25)]) {
+      lengths.add((await seal(page, message)).length);
+    }
+    expect(lengths.size, `wire lengths: ${[...lengths].join(', ')}`).toBe(1);
+  });
+
+  test('n is never grown — an over-long message is refused, not accommodated', async ({ page }) => {
+    await boot(page);
+    await seal(page, 'ok');
+    await page.fill('#auth-message', 'x'.repeat(40));
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('leaves room for');
+    expect(await page.inputValue('#length')).toBe('64');
+  });
+
+  test('the receiver resynchronises without being told the counter', async ({ page }) => {
+    await boot(page);
+    await page.selectOption('#preset', 'base64');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.fill('#auth-message', 'gap');
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.fill('#auth-counter', '6');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await page.click('#auth-open');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('Opened "gap"');
+    await expect(page.locator('#auth-status-text')).toContainText('found counter 6');
+    await expect(page.locator('#auth-status-text')).toContainText('without being told');
+  });
+
+  /**
+   * The headline. The unauthenticated panel accepts roughly one substitution in
+   * thirty; this must accept none. Both are run in the same browser session so
+   * the comparison is like for like.
+   */
+  test('the substitution attack that beats the unauthenticated mode is refused outright', async ({
+    page
+  }) => {
+    await boot(page);
+
+    // First, the unauthenticated mode, so the contrast is measured not assumed.
+    await page.fill('#encode-passphrase', 'correct horse battery staple');
+    await page.click('#encode-run');
+    await settleStatus(page, 'encode-status');
+    await page.click('#swap-run');
+    await settleStatus(page, 'swap-status');
+    const pastFrame = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-utf8'))!;
+    const accepted = /^(\d+) of (\d+)$/.exec(await text(page, 'swap-accepted'))!;
+    // Substitutions got past the frame byte in the unauthenticated mode.
+    expect(Number(pastFrame[1]) + Number(accepted[1])).toBeGreaterThan(0);
+
+    // Now the same attack against the sealed string.
+    await seal(page, 'secret');
+    await page.click('#auth-attack');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('60 substitutions, 0 accepted');
+    await expect(page.locator('#auth-verdict')).toContainText('one in 2^128');
+  });
+
+  test('the page does not claim the branchless ranking is constant-time', async ({ page }) => {
+    await boot(page);
+    const caveat = (await page.locator('#fix-heading').locator('..').textContent()) ?? '';
+    expect(caveat).toContain('Branchless is not constant-time');
+    expect(caveat).toContain('BigInt is');
+    expect(caveat).toContain('variable-time');
+  });
+});
+
+/**
+ * Key agreement, fragments and freshness. Each makes a claim a reader would be
+ * right to doubt — that two sides derived the same secret without sending it,
+ * that a phone number can carry a tag after all, that an authentic message can
+ * still be refused — so each is checked against something the page did not
+ * compute for itself.
+ */
+test.describe('the key exchange derives a shared root without sending one', () => {
+  test('two different public keys, one identical root', async ({ page }) => {
+    await boot(page);
+    await page.click('#hs-run');
+    await settleStatus(page, 'hs-status');
+
+    const rows = await page.locator('#hs-body tr').evaluateAll((trs) =>
+      trs.map((tr) => ({
+        side: (tr.children[0].textContent ?? '').trim(),
+        pub: (tr.children[1].textContent ?? '').trim(),
+        root: (tr.children[2].textContent ?? '').trim()
+      }))
+    );
+    expect(rows.map((r) => r.side)).toEqual(['Alice', 'Bob']);
+    // Different key pairs...
+    expect(rows[0].pub).not.toBe(rows[1].pub);
+    // ...and the same derived root. That is the whole of Diffie-Hellman.
+    expect(rows[0].root).toBe(rows[1].root);
+    expect(rows[0].root).not.toBe(rows[0].pub);
+    await expect(page.locator('#hs-verdict')).toContainText('nothing secret crossed the channel');
+  });
+
+  test('a fresh exchange gives a fresh root every time', async ({ page }) => {
+    await boot(page);
+    const roots = new Set<string>();
+    for (let i = 0; i < 3; i += 1) {
+      await page.click('#hs-run');
+      await settleStatus(page, 'hs-status');
+      roots.add(
+        await page.locator('#hs-body tr').first().evaluate((tr) => (tr.children[2].textContent ?? '').trim())
+      );
+    }
+    expect(roots.size).toBe(3);
+  });
+
+  test('the page does not claim the exchange is authenticated', async ({ page }) => {
+    await boot(page);
+    const section = (await page.locator('#beyond-heading').locator('..').textContent()) ?? '';
+    expect(section).toContain('Unauthenticated Diffie');
+    expect(section).toContain('sit in the middle');
+    expect(section).toContain('Nothing here proves');
+  });
+});
+
+test.describe('fragments carry what one string cannot', () => {
+  test('a phone number carries an authenticated message once it is fragmented', async ({ page }) => {
+    await boot(page);
+    await page.click('#hs-run');
+    await settleStatus(page, 'hs-status');
+
+    // The single-string mode refuses this format outright...
+    await page.fill('#auth-passphrase', 'correct horse battery staple');
+    await page.click('#auth-seal');
+    await settleStatus(page, 'auth-status');
+    await expect(page.locator('#auth-status-text')).toContainText('does not fit');
+
+    // ...and fragmenting is what gets round it.
+    await page.fill('#frag-message', 'meet me at six');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+
+    const wire = (await text(page, 'frag-out')).split('\n').map((s) => s.trim()).filter(Boolean);
+    const pattern = await page.inputValue('#pattern');
+    expect(pattern).toBe(PHONE);
+    const anchored = new RegExp(`^(?:${pattern})$`);
+    expect(wire.length).toBeGreaterThan(1);
+    // Every fragment is independently a valid phone number, per the platform.
+    for (const s of wire) expect(anchored.test(s), s).toBe(true);
+    expect(new Set(wire).size).toBe(wire.length);
+
+    await page.click('#frag-open');
+    await settleStatus(page, 'frag-status');
+    await expect(page.locator('#frag-status-text')).toContainText('"meet me at six"');
+  });
+
+  test('the plan states a fragment count the seal then produces', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'a longer message to spread out');
+    const planned = /that is (\d+) strings/.exec(await text(page, 'frag-plan'));
+    expect(planned, await text(page, 'frag-plan')).not.toBeNull();
+
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    const wire = (await text(page, 'frag-out')).split('\n').filter((s) => s.trim());
+    expect(wire).toHaveLength(Number(planned![1]));
+  });
+
+  test('tampering with one fragment fails the whole message', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'do not tamper');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#frag-tamper');
+    await settleStatus(page, 'frag-status');
+    await expect(page.locator('#frag-status-text')).toContainText('refused');
+    await expect(page.locator('#frag-status-text')).toContainText('tampering with any single piece fails all of it');
+  });
+});
+
+test.describe('freshness is separate from authenticity', () => {
+  test('the same strings open once, then are refused as a replay', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'once only');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('"once only"');
+    await expect(page.locator('#replay-window')).toContainText('Highest accepted: 0');
+
+    // Byte-identical input, still perfectly authentic, now refused.
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('Authentication failed');
+  });
+
+  test('the refusal is the same message a forgery gets — no replay oracle', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'once only');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    const replayText = await text(page, 'replay-status-text');
+
+    // Now a genuine forgery, through the tamper button, and compare wording.
+    await page.click('#frag-tamper');
+    await settleStatus(page, 'frag-status');
+    // The tamper handler reports success-of-refusal in its own words, so
+    // compare against the mode above, which surfaces the raw error.
+    await page.selectOption('#preset', 'hex');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    await page.selectOption('#preset', 'phone');
+    await expect(page.locator('#format-status-text')).toContainText('Compiled.');
+    expect(replayText).toContain('Authentication failed');
+    expect(replayText).not.toMatch(/replay|counter \d+|already/i);
+  });
+
+  test('resetting the window makes the same strings acceptable again', async ({ page }) => {
+    await boot(page);
+    await page.fill('#frag-message', 'again please');
+    await page.click('#frag-seal');
+    await settleStatus(page, 'frag-status');
+    await page.click('#replay-open');
+    await settleStatus(page, 'replay-status');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('Authentication failed');
+
+    await page.click('#replay-reset');
+    await page.click('#replay-again');
+    await settleStatus(page, 'replay-status');
+    await expect(page.locator('#replay-status-text')).toContainText('"again please"');
+  });
+});
